@@ -1,0 +1,29 @@
+groups:
+  - name: dicp_cluster_alerts
+    rules:
+      - alert: NodeMarkedDead
+        expr: cluster_nodes{status="dead"} > 0
+        for: 5s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node failure detected in cluster"
+          description: "One or more nodes have been marked DEAD by the SWIM failure detector."
+
+      - alert: NodeUnderSuspicion
+        expr: failure_suspicions_total > 0
+        for: 2s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node suspicion declared"
+          description: "A node has failed direct and indirect probes and is currently in SUSPECT state."
+
+      - alert: NoHealthyBackends
+        expr: service_instances{health="healthy"} == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "All backends unhealthy"
+          description: "No healthy backend endpoints available in service registry."

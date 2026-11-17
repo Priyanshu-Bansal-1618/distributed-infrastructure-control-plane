@@ -1,0 +1,86 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Alive Cluster Nodes",
+      "type": "stat",
+      "targets": [
+        { "expr": "max(cluster_nodes{status=\"alive\"})", "refId": "A" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "title": "Healthy Service Instances",
+      "type": "stat",
+      "targets": [
+        { "expr": "sum(service_instances{health=\"healthy\"})", "refId": "A" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "title": "Failure Suspicions Declared",
+      "type": "stat",
+      "targets": [
+        { "expr": "sum(failure_suspicions_total)", "refId": "A" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "title": "Failure Deaths Declared",
+      "type": "stat",
+      "targets": [
+        { "expr": "sum(failure_deaths_total)", "refId": "A" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 5,
+      "title": "Gossip Message Exchange Rate",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(gossip_messages_sent_total[10s])", "legendFormat": "Sent {{instance}}", "refId": "A" },
+        { "expr": "rate(gossip_messages_received_total[10s])", "legendFormat": "Recv {{instance}}", "refId": "B" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 6,
+      "title": "SWIM Failure Detection Probes",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(failure_probes_sent_total[10s])", "legendFormat": "Probes Sent", "refId": "A" },
+        { "expr": "rate(failure_direct_acks_total[10s])", "legendFormat": "Direct ACKs", "refId": "B" },
+        { "expr": "rate(failure_indirect_acks_total[10s])", "legendFormat": "Indirect ACKs", "refId": "C" }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["dicp", "control-plane"],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "title": "Distributed Infrastructure Control Plane (DICP)",
+  "uid": "dicp-control-plane",
+  "version": 1
+}

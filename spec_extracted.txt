@@ -1,0 +1,679 @@
+DISTRIBUTEDINFRASTRUCTURECONTROL PLANE
+Project Specification & AI-Agent Implementation Brief
+Version 1.0  |  15 November 2026
+How to use this document
+Give this document to the coding agent as the authoritative project specification, together with a separate implementation prompt. The agent must read the entire document before changing files. This document defines the product scope, architecture, component responsibilities, protocols, data models, interfaces, development order and acceptance criteria.
+The agent must not attempt to generate the whole system in one pass. It must work phase by phase, keep the repository buildable, test every phase, and update the documentation when a design decision changes.
+1. Product definition
+1.1 Problem statement
+A distributed application commonly runs multiple services across multiple machines and replicas. The infrastructure must know which machines participate in a cluster, which services are running on each machine, whether those services are healthy, and where new requests should be sent. Machines and services can join, leave, crash, become unreachable, recover, or temporarily disagree about cluster state.
+The system must provide decentralized cluster membership and failure detection, service registration and discovery, service health monitoring, health-aware request routing, configuration distribution, and operational visibility. It must continue operating through ordinary node and service failures and reconcile state after temporary network disconnections.
+1.2 Proposed solution
+Build a distributed infrastructure control plane composed of independent Node Agent processes. Each agent maintains local cluster state and exchanges membership and service-state updates with peers using a SWIM-inspired gossip protocol. Each agent also exposes an authenticated internal management interface, persists its local state, monitors registered services, and exports metrics.
+A separate HTTP reverse proxy/load balancer forms the data plane. It consumes versioned snapshots of healthy service endpoints from the control plane and routes application requests without performing gossip or distributed registry lookups on the request path. A Python management API provides administrative and read-only operations. Prometheus and Grafana provide metrics and dashboards.
+1.3 Scope and non-goals
+In scope: multi-node cluster membership, gossip dissemination, failure detection, service registry, leases/expiry, health checks, HTTP reverse proxy, routing strategies, configuration versioning/propagation, management API, persistence, observability, fault simulation, tests and Docker-based deployment.
+Not in scope for the initial release: full Kubernetes replacement, consensus-backed linearizable registry, general-purpose VPN, custom TCP/IP stack, production-grade global service mesh, automatic cloud provisioning, or a claim of production readiness.
+The initial system is eventually consistent for membership, service registry and distributed configuration. Strong consistency must not be claimed unless a consensus/coordination protocol is separately designed and implemented.
+2. System architecture
+2.1 Logical architecture
+                    CLIENT APPLICATIONS
+                            |
+                            v
+                 HTTP LOAD BALANCER / PROXY
+                            |
+                    Backend selection
+                            |
+             +--------------+--------------+
+             |              |              |
+          Service A      Service B      Service C
+             ^              ^              ^
+             | versioned healthy-backend snapshots
+             +--------------+--------------+
+                            |
+                  DISTRIBUTED CONTROL PLANE
+        +-------------------+-------------------+
+        |                   |                   |
+     NODE AGENT A        NODE AGENT B        NODE AGENT C
+     - Gossip            - Gossip            - Gossip
+     - Membership        - Membership        - Membership
+     - Registry          - Registry          - Registry
+     - Health monitor    - Health monitor    - Health monitor
+     - Config manager    - Config manager    - Config manager
+     - Local storage     - Local storage     - Local storage
+        |                   |                   |
+        +------ UDP gossip / TCP sync ----------+
+       MANAGEMENT API  ---> Node Agent management interfaces
+       PROMETHEUS      ---> Scrapes agent and proxy metrics
+       GRAFANA         ---> Visualizes Prometheus metrics
+2.2 Control plane and data plane
+Control plane: maintains desired and observed infrastructure information. It handles node membership, service registration, health state, configuration, and generation of routing snapshots.
+Data plane: handles application requests. The load balancer selects a backend from its latest valid routing snapshot and proxies the request. It must not contact the distributed registry synchronously for every request.
+The control plane and data plane must communicate through an explicit, versioned interface. A routing update should be validated and applied atomically as a new immutable backend snapshot. Existing requests should be allowed to finish where possible; removed backends should stop receiving new requests and support graceful connection draining.
+2.3 Processes and responsibilities
+Process
+Responsibilities
+Node Agent (C++20)
+Node identity/lifecycle, UDP gossip, membership, failure detection, local registry, registry replication, service health checks, configuration, persistence, internal API, metrics.
+Load Balancer (C++20)
+HTTP listener, request parsing, service resolution from local snapshot, backend selection, reverse proxy, connection handling, draining, metrics.
+Management API (Python/FastAPI)
+Administrative and read-only API, validation, authentication/authorization, querying agents, configuration workflows. It is not the membership source of truth.
+Prometheus
+Scrapes metrics endpoints and stores time-series metrics.
+Grafana
+Dashboards and alert visualizations based on Prometheus.
+Backend demo services
+Small HTTP services used to validate registration, health checks, routing and failure handling.
+3. Technology stack and build requirements
+Area
+Required technology
+Usage
+Core language
+C++20
+Node Agent and load balancer.
+Networking
+Boost.Asio
+Asynchronous UDP/TCP sockets, timers and event execution.
+HTTP
+A maintained C++ HTTP library compatible with Boost.Asio
+Node Agent internal API and reverse proxy. Select and document one library before implementation; avoid writing a full HTTP parser from scratch.
+Serialization
+Protocol Buffers
+Typed internal messages and schema evolution.
+Local persistence
+SQLite
+Per-agent durable state and metadata.
+Management API
+Python 3 + FastAPI + Pydantic
+Management endpoints and validation.
+Metrics
+Prometheus client/exporter
+Counters, gauges and histograms.
+Dashboards
+Grafana
+Operational visualization.
+Build
+CMake
+C++ build and dependency integration.
+Tests
+GoogleTest, pytest
+C++ unit/integration tests and Python API tests.
+Deployment
+Docker, Docker Compose
+Reproducible multi-node local cluster.
+CI
+GitHub Actions
+Build, lint and test automation.
+Use a dependency manager or a documented, reproducible dependency installation method. Pin or constrain dependency versions. Provide a clean build from a fresh checkout. Do not add PostgreSQL, Redis, Kubernetes, eBPF or other optional technologies to the first release unless a concrete requirement justifies them.
+4. Node Agent specification
+4.1 Node identity and record
+Each agent has a stable configured node_id and a unique process/boot identity. The node record contains node_id, hostname, advertised address, bind address, gossip_port, sync_port, management_port, incarnation number, lifecycle status, metadata, protocol version and update/version information.
+NodeRecord {
+  node_id: string
+  boot_id: string
+  hostname: string
+  advertised_address: string
+  gossip_port: uint16
+  sync_port: uint16
+  management_port: uint16
+  incarnation: uint64
+  status: ALIVE | SUSPECT | DEAD | LEFT
+  metadata: map<string, string>
+  record_version: uint64
+}
+Incarnation numbers allow a live node to refute an older suspicion/failure assertion. Do not rely on wall-clock timestamps as the sole conflict-resolution mechanism; clocks can differ.
+4.2 Lifecycle
+STARTING -> JOINING -> ALIVE -> SUSPECT -> DEAD
+                    \-> LEFT (graceful departure)
+A restarted process must safely rejoin using its configured identity and
+a new boot identity/incarnation policy. Define this policy explicitly.
+A graceful departure is different from an unexpected crash. A missed heartbeat is evidence of possible failure, not proof that a machine is dead.
+4.3 Internal modules
+Module
+Responsibilities
+Bootstrap/config
+Parse and validate configuration, establish node identity, load persisted state, initialize dependencies and join peers.
+Networking
+UDP datagram transport, TCP framed transport, HTTP endpoints, timeouts, message size limits and socket lifecycle.
+Gossip engine
+Periodic peer selection, message send/receive, dissemination queues, duplicate suppression, push/pull synchronization.
+Membership manager
+Maintain node records, apply valid updates, manage lifecycle transitions and expose membership snapshots.
+Failure detector
+Direct probes, indirect probes, suspicion timers, refutation and failure declaration.
+Service registry
+Register/deregister instances, maintain metadata and versions, replicate records, expire leases and answer discovery queries.
+Health monitor
+Active HTTP checks, readiness/liveness interpretation, thresholds and health-state transitions.
+Configuration manager
+Versioned configuration records, validation, propagation, conflict detection and rollback history.
+Storage/repositories
+Persist local state and provide transactional repository interfaces.
+Metrics/logging
+Expose metrics and structured logs without blocking networking operations.
+5. Gossip and membership protocol
+5.1 Protocol behavior
+Implement a SWIM-inspired membership protocol. Keep failure detection and dissemination as separate concerns. Each node periodically selects a peer for a direct probe. If the peer does not respond within the configured timeout, the probing node asks a configurable number of intermediary peers to probe the target. If no indirect probe succeeds, the target is marked SUSPECT and that update is disseminated. If the target does not refute suspicion within the suspicion timeout, it may be marked DEAD.
+A suspected node can refute the suspicion by incrementing its incarnation and disseminating a valid ALIVE update. Implement deterministic update validation and precedence. Higher valid incarnation values must supersede older assertions. Define equal-incarnation status handling carefully, including the rules for refutation and terminal states; do not use an arbitrary timestamp last-write-wins rule.
+5.2 Probe message flow
+Direct probe:
+  A -> B : PING(probe_id)
+  B -> A : ACK(probe_id)
+Indirect probe after direct timeout:
+  A -> C : PING_REQ(target=B, probe_id)
+  C -> B : PING(probe_id)
+  B -> C : ACK(probe_id)
+  C -> A : ACK_RELAY(probe_id)
+If all probes fail:
+  A marks B SUSPECT and disseminates the update.
+  If suspicion expires without valid refutation, B becomes DEAD.
+5.3 Gossip dissemination
+Periodically select peers and exchange bounded batches of membership/service updates.
+Support duplicate-message suppression using message identifiers or version tracking.
+Use push/pull summaries so a node can request updates it is missing after reconnecting.
+Bound message size, queue length and retransmission work. Prioritize important membership transitions.
+Handle UDP loss, duplication and reordering at the application layer.
+Document convergence assumptions: eventual connectivity, recurring exchanges, and sufficient time for dissemination.
+5.4 Configuration parameters
+Parameter
+Meaning
+probe_interval_ms
+Time between probe cycles.
+probe_timeout_ms
+Direct probe response deadline.
+indirect_probe_count
+Number of intermediary nodes.
+suspicion_timeout_ms
+Time before an unrefuted suspicion becomes DEAD.
+gossip_interval_ms
+Gossip dissemination frequency.
+gossip_fanout
+Number of peers selected for an exchange.
+max_gossip_message_bytes
+Maximum accepted gossip datagram size.
+max_pending_updates
+Bound on queued dissemination work.
+All values must be configurable. Provide safe development defaults and benchmark them. Avoid claiming universal failure-detection guarantees.
+5.5 Example Protocol Buffer messages
+syntax = "proto3";
+package dicp.protocol;
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_ALIVE = 1;
+  NODE_SUSPECT = 2;
+  NODE_DEAD = 3;
+  NODE_LEFT = 4;
+}
+message NodeUpdate {
+  string node_id = 1;
+  uint64 incarnation = 2;
+  NodeStatus status = 3;
+  uint64 record_version = 4;
+  string advertised_address = 5;
+}
+message GossipMessage {
+  uint32 protocol_version = 1;
+  string sender_node_id = 2;
+  string message_id = 3;
+  uint64 sender_sequence = 4;
+  repeated NodeUpdate node_updates = 5;
+}
+This is a starting schema, not the complete final protocol. Define message types for PING, ACK, PING_REQ, ACK_RELAY, membership summaries, update batches, service updates and synchronization requests. Validate sender identity, protocol version, payload size and required fields.
+6. Distributed service registry
+6.1 Service instance data model
+ServiceInstance {
+  instance_id: string
+  service_name: string
+  owner_node_id: string
+  address: string
+  port: uint16
+  protocol: HTTP | HTTPS
+  service_version: string
+  metadata: map<string, string>
+  health: UNKNOWN | HEALTHY | UNHEALTHY | DRAINING
+  owner_incarnation: uint64
+  record_version: uint64
+  lease_expiry: logical/monotonic lease state
+}
+A service instance is distinct from a node. One node may host multiple instances and multiple services. Node failure must not be confused with an individual service failure.
+6.2 Registration and discovery
+A service registers with its local Node Agent, providing service name, unique instance ID, listening address/port, protocol, version and metadata.
+The agent validates the request, records ownership and version, and disseminates the registration to peers.
+Discovery returns eligible instances for a requested service. Normal routing queries must exclude expired, unhealthy, draining or otherwise ineligible instances.
+Support explicit deregistration and lease renewal. A service that disappears without deregistering must eventually expire.
+Provide deterministic record ordering and conflict resolution per instance. Use owner incarnation plus monotonically increasing record version or another explicitly documented scheme.
+Use tombstones for deregistration/deletion and retain them long enough to prevent stale records from reappearing during normal synchronization. Define tombstone garbage-collection rules.
+6.3 Consistency model
+The initial registry is eventually consistent. Different nodes may temporarily return different results. It does not provide linearizable reads or transactions across the cluster. Document behavior during partitions and after healing. Ensure that stale data cannot remain eligible indefinitely due to missing lease renewal or missed deregistration.
+7. Health monitoring
+Track node health and service health separately. Node health is inferred from membership probes. Service health is determined by checks against a registered application instance.
+Check/state
+Definition
+Liveness
+Whether the service process responds to its liveness endpoint.
+Readiness
+Whether the service is ready to accept normal traffic.
+Active check
+Agent periodically sends an HTTP request to a configured health endpoint.
+Passive signal (optional)
+Proxy observations such as connection failures and upstream errors; must not alone cause unsafe rapid flapping.
+Track last success, last failure, response status, latency, consecutive failures and consecutive successes. Use configurable failure and recovery thresholds with hysteresis. Example development defaults: three consecutive failures to mark unhealthy and two consecutive successes to recover.
+Health states: UNKNOWN, HEALTHY, UNHEALTHY, RECOVERING, DRAINING. Only healthy and ready instances are eligible for ordinary routing. A node can remain ALIVE while one of its services is UNHEALTHY.
+7.1 Circuit breaker
+Implement a circuit breaker in the proxy as an optional resilience feature. CLOSED permits normal requests; OPEN stops sending requests to a failing backend; HALF_OPEN permits a limited number of trial requests. Define thresholds, cooldown and success criteria. Keep circuit-breaker state distinct from registry membership and health-check state.
+8. HTTP load balancer / data plane
+8.1 Request flow
+Client
+  -> HTTP listener
+  -> parse and validate request
+  -> identify target service (configured route/path/host mapping)
+  -> read current immutable backend snapshot
+  -> filter eligible backends
+  -> choose backend using configured strategy
+  -> proxy request and response
+  -> update request/connection metrics
+The proxy must support HTTP/1.1 request/response forwarding for the initial release. Define supported methods, headers, body limits, timeout behavior, connection reuse policy and streaming behavior. Correctly handle hop-by-hop headers. Do not claim full HTTP proxy compatibility unless tested.
+8.2 Routing strategies
+Strategy
+Required behavior
+Round Robin
+Cycle through eligible backends; thread-safe selection.
+Weighted Round Robin
+Distribute selections according to configured positive weights.
+Least Connections
+Choose the eligible backend with the lowest active connection count; update counts safely.
+Consistent Hashing
+Hash a configured request key (e.g. customer ID) onto a ring with virtual nodes; minimize remapping when backends change.
+Every strategy must exclude unhealthy, expired, draining and administratively disabled backends. Define deterministic behavior for an empty backend set and return an appropriate gateway/service-unavailable response.
+8.3 Dynamic backend snapshots
+The control plane generates a versioned list of eligible backend endpoints.
+The proxy validates the new snapshot and atomically publishes it for request threads.
+Request handling reads a stable snapshot without holding a global lock for the duration of proxying.
+When a backend is removed, stop assigning new requests to it and support graceful draining of in-flight connections.
+Record snapshot version and update timestamp for diagnostics.
+8.4 Proxy metrics
+Total requests, successful requests and failed requests.
+Requests per backend and selected strategy.
+Active connections per backend.
+Upstream connection errors and timeouts.
+Request latency histogram, including P50/P95/P99 calculated from appropriate histogram data.
+Backend snapshot version and update propagation delay.
+9. Distributed configuration management
+Support versioned configuration records scoped to cluster, service or node. A record includes config_id/key, value, scope, target, version, owner/author, validation status and update metadata. Updates are validated before propagation. Nodes apply only valid, newer versions according to a documented conflict policy.
+Provide read, create, update and history operations.
+Retain previous values and support rollback as a new version rather than silently rewriting history.
+Propagate updates through the control-plane dissemination mechanism or reliable synchronization channel as appropriate.
+Provide acknowledgements/observed versions so operators can see which nodes have applied a change.
+Support staged rollout: validate, apply to a subset, check health, continue or roll back.
+The initial model is eventually consistent. Do not claim atomic all-node updates. Critical changes must document partial-application behavior.
+10. Persistence and recovery
+10.1 Local SQLite storage
+Each Node Agent maintains its own local SQLite database. SQLite is for durable local state, not a shared distributed database and not the replication transport.
+CREATE TABLE nodes (
+  node_id TEXT PRIMARY KEY,
+  boot_id TEXT NOT NULL,
+  hostname TEXT,
+  advertised_address TEXT,
+  status TEXT NOT NULL,
+  incarnation INTEGER NOT NULL,
+  record_version INTEGER NOT NULL
+);
+CREATE TABLE service_instances (
+  instance_id TEXT PRIMARY KEY,
+  service_name TEXT NOT NULL,
+  owner_node_id TEXT NOT NULL,
+  address TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  protocol TEXT NOT NULL,
+  health_status TEXT NOT NULL,
+  owner_incarnation INTEGER NOT NULL,
+  record_version INTEGER NOT NULL,
+  lease_expiry INTEGER
+);
+CREATE INDEX idx_service_name
+  ON service_instances(service_name);
+CREATE INDEX idx_service_owner
+  ON service_instances(owner_node_id);
+CREATE TABLE configurations (
+  config_id TEXT PRIMARY KEY,
+  config_key TEXT NOT NULL,
+  config_value TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE TABLE configuration_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  previous_value TEXT,
+  new_value TEXT,
+  updated_at INTEGER
+);
+Extend the schema with migrations, constraints, tombstones, lease/expiry metadata and indexes as required. Use transactions for related updates. Keep database calls off the networking event loop. Define which state is authoritative, reconstructible or ephemeral. On restart, load durable state, validate it, refresh leases/health, and reconcile with peers before treating stale records as routable.
+11. Management API
+Implement a Python FastAPI service that communicates with Node Agent management endpoints using a documented client. It may aggregate views from agents, but it must not become the authoritative membership database.
+Method
+Endpoint
+Purpose
+GET
+/api/v1/cluster
+Cluster overview.
+GET
+/api/v1/nodes
+List known nodes.
+GET
+/api/v1/nodes/{node_id}
+Node detail.
+POST
+/api/v1/nodes/{node_id}/drain
+Request graceful drain.
+GET
+/api/v1/services
+List services.
+GET
+/api/v1/services/{name}/instances
+Discover instances.
+POST
+/api/v1/services/register
+Register a service instance or forward to its owning agent.
+DELETE
+/api/v1/services/{name}/instances/{instance_id}
+Deregister an instance.
+GET
+/api/v1/health
+Overall health.
+GET
+/api/v1/health/nodes
+Node health view.
+GET
+/api/v1/health/services
+Service health view.
+GET
+/api/v1/config
+List/get configuration.
+POST
+/api/v1/config
+Create configuration.
+PUT
+/api/v1/config/{config_id}
+Create a new configuration version.
+GET
+/api/v1/config/{config_id}/history
+Configuration history.
+POST
+/api/v1/config/{config_id}/rollback
+Rollback by creating a new version.
+GET
+/api/v1/loadbalancer/backends
+Current backend snapshot.
+GET
+/api/v1/loadbalancer/stats
+Routing statistics.
+PUT
+/api/v1/loadbalancer/strategy
+Change routing strategy.
+Define request/response schemas, status codes, pagination, error format, authentication and authorization. Administrative endpoints must require authorization. Do not expose unauthenticated shutdown, configuration mutation or other privileged operations.
+12. Observability and operational behavior
+12.1 Prometheus metrics
+cluster_nodes{status="alive"}                  gauge
+cluster_membership_changes_total               counter
+gossip_messages_sent_total                      counter
+gossip_messages_received_total                  counter
+gossip_message_bytes_total                     counter
+gossip_propagation_seconds                      histogram
+failure_detection_seconds                      histogram
+service_instances{health="healthy"}             gauge
+service_health_checks_total{result="success"}  counter
+service_health_check_seconds                   histogram
+registry_updates_total{operation="register"}    counter
+loadbalancer_requests_total{service,code}       counter
+loadbalancer_active_connections{backend}        gauge
+loadbalancer_request_duration_seconds           histogram
+routing_snapshot_version                       gauge
+Metric names may be refined during implementation. Avoid high-cardinality labels such as request IDs, arbitrary user IDs or unbounded instance metadata. Export a /metrics endpoint from agents and proxy.
+12.2 Structured logs
+Emit structured logs with timestamp, severity, node_id, component, event name, message/correlation ID where relevant, target node/service and error details. Use DEBUG, INFO, WARN, ERROR and FATAL levels. Never log credentials, private keys or sensitive configuration values.
+12.3 Dashboards
+Cluster overview: alive/suspect/dead/left nodes, membership changes and node details.
+Gossip: message rates, bytes, packet errors, propagation time and convergence.
+Health: healthy/unhealthy instances, check latency, failure and recovery transitions.
+Load balancer: request rate, errors, active connections, backend distribution and latency percentiles.
+Configuration: versions and per-node application status.
+13. Security requirements
+Validate every inbound message and API request; enforce maximum message/body sizes.
+Authenticate and authorize management operations. Restrict privileged endpoints.
+Do not execute arbitrary commands received over the network.
+Protect secrets using environment variables or a documented secret mechanism; never commit secrets.
+Add rate limits and timeouts to exposed endpoints.
+For the advanced security stage, implement mutual TLS for TCP/HTTP agent communication and authenticated UDP gossip messages. HTTPS on the management API alone does not secure UDP gossip.
+Define replay protection and message authentication for cluster messages. Document certificate provisioning and rotation if mTLS is implemented.
+14. Fault injection and test environment
+Provide a reproducible cluster simulator using Docker Compose and scripts. It must support starting/stopping nodes and demo services, introducing latency and packet loss, creating network partitions, restarting nodes and generating HTTP traffic.
+Fault
+Injection method / expected test
+Node crash
+Stop an agent container/process; peers should suspect and eventually mark it dead.
+Graceful leave
+Request drain/leave; peers should receive a departure update.
+Packet loss
+Use isolated Linux network namespaces and tc netem; measure false suspicion and convergence.
+Latency
+Inject delay/jitter; observe probe and health-check behavior.
+Network partition
+Separate node groups; observe divergent local views and reconciliation after healing.
+Service crash
+Stop one backend while its node remains alive; only that service instance becomes ineligible.
+Slow backend
+Delay responses; evaluate health policy and circuit breaker.
+Node restart
+Restart an agent with persisted state; verify identity/incarnation and reconciliation behavior.
+Fault injection must be limited to the test environment. Provide cleanup commands that remove network emulation rules and stop containers.
+15. Benchmark and evaluation plan
+Build repeatable benchmarks and record hardware, OS/kernel, compiler/build mode, node count, network topology, configuration, workload, run duration and repetitions. Report measured results only; never fabricate benchmark figures.
+Experiment
+Measurements
+Cluster convergence
+Time for a newly introduced membership update to reach all reachable nodes; repeat at 5, 10, 25, 50 and 100 nodes where feasible.
+Failure detection
+Time from process termination to SUSPECT and DEAD; false suspicion rate under latency/loss.
+Gossip overhead
+Messages/bytes per node per second, CPU and memory.
+Registry propagation
+Time for registration/deregistration to become visible across reachable nodes; stale-record behavior.
+Load balancing
+Requests/sec, error rate, P50/P95/P99 latency and distribution across backends for each strategy.
+Backend failure
+Requests sent to failed backend after failure, time to stop routing, failed request count and recovery time.
+Recovery
+Time for a restarted node/service to rejoin, synchronize and become eligible.
+Use wrk or an equivalent HTTP load generator, iperf3 for network baselines, tc netem for network impairment, Linux perf for profiling and Google Benchmark for isolated C++ components.
+16. Repository layout
+distributed-infrastructure-control-plane/
+  README.md
+  CMakeLists.txt
+  CMakePresets.json
+  .clang-format
+  docs/
+    architecture.md
+    system-design.md
+    protocol-specification.md
+    membership.md
+    registry.md
+    failure-model.md
+    api-specification.md
+    database-schema.md
+    security.md
+    deployment.md
+    benchmarking.md
+    decisions/                 # ADRs
+  proto/
+    common.proto
+    gossip.proto
+    membership.proto
+    registry.proto
+    configuration.proto
+  core/
+    common/
+    networking/
+    gossip/
+    membership/
+    registry/
+    health/
+    load_balancer/
+    config_manager/
+    storage/
+    agent/
+  management/
+    api/
+    models/
+    clients/
+    services/
+    tests/
+  dashboard/
+  monitoring/
+    prometheus/
+    grafana/
+    alerts/
+  tests/
+    unit/
+    integration/
+    networking/
+    fault_injection/
+    performance/
+  simulator/
+    cluster_simulator/
+    fault_injector/
+    traffic_generator/
+  deployments/
+    docker/
+    compose/
+    configs/
+  scripts/
+Create directories as needed; do not create empty placeholder modules. Keep public headers/interfaces separate from implementations where appropriate. Use clear module ownership and dependency direction; avoid circular dependencies.
+17. Configuration and default ports
+node:
+  id: node-001
+  bind_address: 0.0.0.0
+  advertised_address: 127.0.0.1
+network:
+  gossip_port: 7946
+  sync_port: 7947
+  management_port: 8080
+gossip:
+  interval_ms: 500
+  fanout: 3
+  max_message_bytes: 1200
+failure_detection:
+  probe_interval_ms: 1000
+  probe_timeout_ms: 500
+  indirect_probe_count: 3
+  suspicion_timeout_ms: 5000
+registry:
+  default_lease_seconds: 30
+health:
+  interval_seconds: 5
+  failure_threshold: 3
+  recovery_threshold: 2
+storage:
+  database_path: ./data/node.db
+load_balancer:
+  listen_address: 0.0.0.0
+  listen_port: 8081
+  strategy: round_robin
+Port (development default)
+Protocol
+Purpose
+7946
+UDP
+Gossip and probes.
+7947
+TCP
+Internal synchronization/control stream.
+8080
+TCP
+Node Agent management API.
+8081
+TCP
+Load balancer listener.
+8000
+TCP
+Python management API.
+9090
+TCP
+Prometheus.
+3000
+TCP
+Grafana.
+All ports and bind/advertised addresses must be configurable. In Docker, use service DNS/container addresses for inter-container communication; do not assume localhost refers to another container.
+18. Implementation phases and acceptance criteria
+Phase 0 — Architecture and contracts
+Inspect repository; produce architecture, module boundaries, ADRs, protocol schemas, configuration schema, API contracts and build plan. Resolve ambiguities before coding.
+Phase 1 — Node Agent foundation
+Build a C++20 agent with configuration, identity, logging, graceful shutdown, UDP/TCP transport and message serialization. Acceptance: two agents exchange valid structured messages; malformed/oversized messages are rejected; clean shutdown works.
+Phase 2 — Membership and gossip
+Implement peer bootstrap, direct/indirect probes, suspicion, incarnation refutation, dissemination and push/pull sync. Acceptance: five agents discover one another, detect a killed node, and reconcile after restart.
+Phase 3 — Service registry
+Implement register, renew, deregister, leases, versions, replication, tombstones and discovery. Acceptance: register on one node and discover from another; stop/expire an instance; ensure stale data does not remain routable indefinitely.
+Phase 4 — Health monitoring
+Implement active checks, readiness/liveness semantics, thresholds and recovery. Acceptance: a failed service becomes unhealthy while its node remains alive; it becomes healthy after recovery checks.
+Phase 5 — Load balancer
+Implement HTTP proxy, backend snapshots, four routing strategies, health filtering, metrics and draining. Acceptance: requests reach registered backends; distribution is measurable; failed backends stop receiving new requests.
+Phase 6 — Configuration management
+Implement scoped versioned config, validation, replication, per-node acknowledgements/history and rollback. Acceptance: updates propagate; stale versions are rejected; rollback creates a new version.
+Phase 7 — Management and observability
+Implement FastAPI endpoints, authentication, Prometheus metrics and Grafana dashboards. Acceptance: inspect cluster/services/health and observe metrics during a failure test.
+Phase 8 — Fault simulation and benchmarks
+Implement repeatable node/service failure, packet loss, latency and partition tests; produce benchmark scripts and reports. Acceptance: experiments are reproducible and report measured results.
+Phase 9 — Hardening and release
+Review security, resource limits, restart behavior, documentation, CI and Docker Compose. Acceptance: fresh checkout builds and runs the documented demonstration without manual code edits.
+19. Testing requirements
+Unit tests for serialization, message validation, membership update ordering, incarnation/refutation, registry versioning, lease expiration, routing algorithms, circuit breaker and configuration conflict handling.
+Integration tests with multiple real agent processes, not only mocked objects.
+Deterministic tests using an injectable clock/timer abstraction for timeout and lease logic.
+Network tests for packet loss, duplication, reordering, latency and partition/recovery.
+Load tests for concurrent HTTP requests, backend failures and snapshot updates.
+Stress tests for bounded queues, memory use and shutdown under load.
+CI must build in a clean environment and run unit tests on every change. Integration/fault tests may run in a separate CI job if they require privileged networking.
+20. Definition of done
+The project is complete only when all of the following are true:
+Multiple Node Agents run as independent processes/containers and discover one another.
+Membership updates disseminate and converge after temporary communication failures.
+Direct and indirect probes, suspicion, refutation and failure declaration are implemented and tested.
+Services can register, renew, deregister, expire and be discovered across nodes.
+Node health and service health are represented independently.
+The load balancer routes HTTP traffic using all four documented strategies.
+Unhealthy, expired and draining instances are excluded from new routing decisions.
+Routing snapshots update safely without a distributed lookup on each request.
+Configuration is versioned, validated, propagated and auditable, with rollback.
+Local state survives agent restart according to documented persistence rules.
+Management API is secured and exposes documented operations.
+Prometheus metrics and Grafana dashboards show cluster, gossip, health and proxy behavior.
+Docker Compose starts a reproducible demo cluster.
+Fault injection demonstrates node crash, service crash, packet loss, partition and recovery.
+Automated tests and measured benchmark reports are included.
+README and architecture/protocol documentation explain setup, operation, limitations and known issues.
+21. Required behavior from the AI coding agent
+Read this entire specification before making changes. Treat it as the source of truth unless a conflict is explicitly raised and resolved.
+Start by inspecting the repository and reporting its current state. Do not overwrite existing work without understanding it.
+Before coding, produce an implementation plan, dependency list, module contracts, protocol/API schemas and a list of unresolved decisions.
+Implement one phase at a time. Do not scaffold the entire system with empty files or placeholder implementations.
+At the end of each phase, build, run relevant tests, fix failures, update documentation and summarize what is genuinely complete.
+Keep the project runnable at every milestone. Prefer a small integrated vertical slice over disconnected modules.
+Do not silently mock a feature, fake a metric, hardcode benchmark results or claim unsupported guarantees.
+Use explicit TODOs for deferred work and explain the impact. Ask for clarification only when a decision materially affects architecture or correctness; otherwise choose a sensible documented default.
+Maintain an Architecture Decision Record (ADR) for significant choices, especially consistency, failure detection, state ownership, transport, persistence and security.
+Never expose secrets in logs or commit them. Do not run destructive commands or alter host networking outside an isolated test environment without explicit approval.
+Appendix A — Suggested first instruction to the agent
+Read the attached Distributed Infrastructure Control Plane specification completely. Do not start implementing the full system yet.First inspect the current repository and environment. Then produce:1. A concise architecture summary and component dependency graph.2. A list of all external dependencies and exact installation/build approach.3. Proposed C++ interfaces and ownership boundaries for the Node Agent, networking, gossip, membership, registry, health monitor, storage and load balancer.4. Initial Protocol Buffer schemas and internal HTTP API contracts.5. The local configuration format and Docker Compose topology.6. A phase-by-phase implementation plan with testable acceptance criteria.7. A list of ambiguities, risks and architectural decisions that need resolution.Check the plan against every requirement in the specification. Identify any contradictions or missing details before coding. Do not claim that a design is implemented. Once the plan is reviewed, begin Phase 0/Phase 1 only, preserving a clean, buildable repository.
+Appendix B — Design constraints to preserve
+Membership, registry and configuration are eventually consistent in the initial design.
+A node being alive does not imply every service on it is healthy.
+The management API is not the cluster's source of truth.
+The load balancer uses local versioned snapshots and does not synchronously query the distributed registry per request.
+UDP is lossy; application-level message validation, duplicate handling and reconciliation are mandatory.
+SQLite is per-node persistence, not shared cluster storage.
+A node failure detector can suspect a healthy but unreachable node; document this limitation.
+A service lease/expiry and tombstone policy is required to prevent stale registrations from persisting or reappearing.
+A working, tested implementation is more important than matching the proposed file count or adding optional technologies.

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package dicp.proto;
+
+import "common.proto";
+
+message ServiceInstanceRecord {
+  string instance_id = 1;
+  string service_name = 2;
+  string owner_node_id = 3;
+  string address = 4;
+  uint32 port = 5;
+  ServiceProtocol protocol = 6;
+  string service_version = 7;
+  map<string, string> metadata = 8;
+  HealthStatus health = 9;
+  uint64 owner_incarnation = 10;
+  uint64 record_version = 11;
+  uint64 lease_expiry_unix_sec = 12;
+  uint32 weight = 13;
+  bool deleted = 14;
+  uint64 deleted_at_unix_sec = 15;
+}
+
+message ServiceUpdate {
+  string instance_id = 1;
+  string service_name = 2;
+  string owner_node_id = 3;
+  ServiceInstanceRecord instance = 4;
+  bool is_tombstone = 5;
+}

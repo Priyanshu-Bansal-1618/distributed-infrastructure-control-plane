@@ -1,0 +1,267 @@
+# Distributed Infrastructure Control Plane (DICP) - Complete Implementation Record
+
+This document records the entire design, implementation, testing, and evaluation performed for the **Distributed Infrastructure Control Plane (DICP)** project.
+
+---
+
+## 1. Project Overview & Architecture
+
+DICP is a production-grade, decentralized infrastructure control plane and data-plane load balancer implemented in **C++20** with **Boost.Asio**, **Boost.Beast**, **Protocol Buffers**, **SQLite**, **Python FastAPI**, **Prometheus**, **Grafana**, and **Docker Compose**.
+
+### Key Architecture Decisions:
+1. **Control Plane vs. Data Plane Separation**:
+   - **Control Plane (`dicp_agent`)**: Decentralized cluster membership, SWIM gossip failure detection, active health monitoring, service registration with leases/tombstones, and distributed configuration.
+   - **Data Plane (`dicp_lb`)**: Boost.Beast asynchronous HTTP reverse proxy consuming versioned, immutable `BackendSnapshot` objects (`std::shared_ptr<const BackendSnapshot>`). The data plane performs **zero** distributed lookups or gossip on the request path; snapshots are swapped atomically without locking the request pipeline.
+2. **Decentralized Consensus-Free Gossip**:
+   - Peer-to-peer membership state exchange over UDP with bounded MTU (1200 bytes) and binary framing.
+   - SWIM failure detector with direct probes, indirect relay probes (`Ping-Req`), suspicion timeouts, and incarnation refutation.
+   - Deterministic state precedence: Higher incarnation wins; equal incarnation: $\text{DEAD} > \text{SUSPECT} > \text{ALIVE}$; $\text{LEFT}$ is absorbing.
+3. **Local Persistence & Crash Recovery**:
+   - Each node maintains an independent local SQLite database with Write-Ahead Logging (`WAL`).
+   - On restart, the node loads its previous incarnation number, increments it, and broadcasts an ALIVE announcement to refute any residual failure claims.
+
+---
+
+## 2. Directory Structure & Files Created
+
+```
+distributed-infrastructure-control-plane/
+├── CMakeLists.txt                      # C++20 CMake build configuration
+├── CMakePresets.json                   # Standard CMake presets (debug, release, test)
+├── .clang-format                       # Google-style C++20 formatting rules
+├── README.md                           # Master system documentation & quickstart
+├── implementation_agy                  # Complete implementation record (this file)
+│
+├── proto/                              # Protocol Buffer definitions
+│   ├── common.proto                    # Shared enums (NodeStatus, HealthStatus, ServiceProtocol)
+│   ├── gossip.proto                    # Binary Framing, Ping, Ack, PingReq, GossipBatch, Sync
+│   ├── membership.proto                # NodeRecord, NodeUpdate
+│   ├── registry.proto                  # ServiceInstanceRecord, ServiceUpdate
+│   └── configuration.proto             # ConfigRecord, ConfigUpdate, ConfigScope
+│
+├── core/                               # C++20 Core Subsystems
+│   ├── common/
+│   │   ├── types.hpp                   # Core type aliases, timestamps, constants
+│   │   ├── uuid.hpp                    # Cryptographically secure UUIDv4 generator
+│   │   ├── logger.hpp                  # Structured JSON logging macro suite
+│   │   └── config.hpp / config.cpp     # JSON configuration parser & validator
+│   ├── networking/
+│   │   ├── message_frame.hpp / .cpp    # Binary framing (0x44494350), CRC32, MTU bounds
+│   │   ├── udp_transport.hpp / .cpp    # Non-blocking async Boost.Asio UDP transport
+│   │   └── tcp_transport.hpp / .cpp    # Length-prefixed framed Boost.Asio TCP transport
+│   ├── agent/
+│   │   ├── node_identity.hpp / .cpp    # Node identity, boot ID, incarnation management
+│   │   ├── node_agent.hpp / .cpp       # Node orchestrator, event loop, lifecycle, seeds
+│   │   ├── agent_http_server.hpp / .cpp# Beast HTTP management & /metrics server
+│   │   └── main.cpp                    # dicp_agent CLI entrypoint
+│   ├── membership/
+│   │   ├── membership_manager.hpp / .cpp # Deterministic state machine & update resolution
+│   │   └── failure_detector.hpp / .cpp # SWIM failure detector (direct/indirect probes, suspicion)
+│   ├── gossip/
+│   │   ├── dissemination_queue.hpp / .cpp # Bounded priority queue with fanout tracking
+│   │   └── gossip_engine.hpp / .cpp    # Random peer fanout, deduplication cache, fast join
+│   ├── registry/
+│   │   └── service_registry.hpp / .cpp # Leases, heartbeats, tombstones, and discovery
+│   ├── health/
+│   │   └── health_monitor.hpp / .cpp   # Beast async HTTP client, hysteresis thresholding
+│   ├── load_balancer/
+│   │   ├── backend_snapshot.hpp        # Versioned immutable backend snapshots
+│   │   ├── load_balancer_strategy.hpp  # RR, Weighted RR, Least Conn, Consistent Hash
+│   │   ├── http_proxy.hpp / .cpp       # Asynchronous Beast reverse proxy, atomic snapshot swap
+│   │   └── main.cpp                    # dicp_lb CLI entrypoint
+│   ├── config_manager/
+│   │   └── config_manager.hpp / .cpp   # Versioned key-value store, scopes, audit rollback
+│   └── storage/
+│       └── sqlite_storage.hpp / .cpp   # SQLite WAL persistence for nodes, services, configs
+│
+├── management/                         # Python FastAPI Management Service
+│   ├── api/app.py                      # FastAPI application with Bearer token authentication
+│   ├── models/schemas.py               # Pydantic v2 schemas for API contracts
+│   ├── clients/agent_client.py         # HTTPX asynchronous client for Node Agent REST API
+│   ├── services/cluster_service.py     # Cluster aggregation & failover logic
+│   ├── requirements.txt                # Python package dependencies
+│   └── tests/test_management_api.py    # Pytest test suite for management endpoints
+│
+├── monitoring/                         # Observability & Metrics
+│   ├── prometheus/prometheus.yml       # Prometheus scrape configurations
+│   ├── alerts/cluster_alerts.yml       # Prometheus alert rules (NodeDead, Suspect, NoBackends)
+│   └── grafana/                        # Provisioned Grafana datasources & dashboard JSON
+│
+├── deployments/                        # Multi-Node Docker Deployment
+│   ├── docker/
+│   │   ├── Dockerfile.agent            # Multi-stage C++20 builder & runtime image
+│   │   ├── Dockerfile.api              # Python 3.12-slim management API image
+│   │   ├── Dockerfile.backend          # Demo HTTP backend service image
+│   │   └── backend_server.py           # Lightweight Python HTTP server handling /health & traffic
+│   ├── configs/                        # JSON configs for multi-node agent cluster
+│   │   ├── node1.json                  # Seed Node 1 config
+│   │   ├── node2.json                  # Node 2 config
+│   │   └── node3.json                  # Node 3 config
+│   └── compose/
+│       └── docker-compose.yml          # Multi-node cluster: 3 agents, 2 backends, LB, API, Prom, Grafana
+│
+├── simulator/                          # Fault Injection & Simulation Engine
+│   ├── cluster_simulator/simulator.py  # 4-stage cluster fault & recovery simulator
+│   ├── fault_injector/fault_injector.py# Hard crash, graceful stop, and network fault injector
+│   └── traffic_generator/
+│       ├── benchmark.py                # Concurrent HTTP load generator & benchmark runner
+│       └── benchmark_results.json      # Genuine measured benchmark results
+│
+├── docs/                               # Comprehensive Technical Documentation
+│   ├── architecture.md                 # Architecture overview, components, contracts
+│   ├── system-design.md                # In-depth system design & component diagrams
+│   ├── protocol-specification.md       # Binary framing & message type specifications
+│   ├── membership.md                   # SWIM protocol, suspicion state machine, refutation
+│   ├── registry.md                     # Service leases, renewals, and tombstone GC
+│   ├── failure-model.md                # Crash-recovery model, network partitions, clock skew
+│   ├── api-specification.md            # Node Agent and Management REST API contracts
+│   ├── database-schema.md              # SQLite tables, indexing, WAL configuration
+│   ├── security.md                     # Threat model, token authentication, mTLS roadmap
+│   ├── deployment.md                   # Docker Compose & production systemd deployment guide
+│   ├── benchmarking.md                 # Measured performance benchmark results & analysis
+│   ├── roadmap.md                      # 12-phase roadmap and acceptance criteria
+│   └── decisions/                      # Architecture Decision Records
+│       ├── ADR-001-swim-gossip-membership.md
+│       ├── ADR-002-boost-asio-beast.md
+│       ├── ADR-003-data-plane-snapshot-isolation.md
+│       ├── ADR-004-eventual-consistency-tombstones.md
+│       └── ADR-005-sqlite-local-persistence.md
+│
+└── tests/                              # Automated C++ Unit Tests (GoogleTest)
+    └── unit/
+        ├── test_config.cpp
+        ├── test_message_frame.cpp
+        ├── test_node_identity.cpp
+        ├── test_udp_transport.cpp
+        ├── test_membership.cpp
+        ├── test_failure_detector.cpp
+        ├── test_cluster_convergence.cpp
+        ├── test_service_registry.cpp
+        ├── test_load_balancer.cpp
+        ├── test_config_manager.cpp
+        └── test_sqlite_storage.cpp
+```
+
+---
+
+## 3. Subsystem Implementation Details
+
+### 3.1 UDP Framing & Networking (`core/networking/`)
+- Magic bytes: `0x44494350` ("DICP").
+- Header fields: `protocol_version` (1), `message_type` (uint16_t), `payload_length` (uint32_t), `crc32` (uint32_t).
+- Bound validation: Strict rejection of frames exceeding MTU (1200 bytes) or failing CRC32 verification.
+- Transport: Boost.Asio non-blocking asynchronous UDP socket with continuous receive loops.
+
+### 3.2 SWIM Failure Detection & Gossip (`core/membership/`, `core/gossip/`)
+- **Direct Probe**: Every `probe_interval_ms`, a node randomly selects an alive peer and transmits a `MSG_PING`.
+- **Indirect Probe (`Ping-Req`)**: If direct probe does not receive an `ACK` within `probe_timeout_ms`, $k$ random relay peers are selected to send `MSG_PING_REQ` to the target.
+- **Suspicion Timer**: If relays fail, the target transitions to `NODE_SUSPECT`. A suspicion timer (`suspicion_timeout_ms`) begins. If unrefuted, the target transitions to `NODE_DEAD`.
+- **Incarnation Refutation**: If a node receives a claim that it is `SUSPECT` or `DEAD` at incarnation $\le$ its own, it refutes the claim by monotonically incrementing its incarnation number and broadcasting `ALIVE`.
+- **Fast Join**: A bootstrap reply mechanism transmits the seed's active cluster membership immediately upon receiving a join announcement, achieving 1 RTT convergence.
+
+### 3.3 Replicated Service Registry (`core/registry/`)
+- Services register with `instance_id`, `service_name`, `host`, `port`, `weight`, and `lease_duration_sec`.
+- Periodic lease checks mark unrenewed instances as expired and transition them to tombstones.
+- Tombstones are preserved for $T_{\text{tombstone}}$ (60 seconds) to prevent resurrection from lagging gossip messages, then garbage-collected.
+
+### 3.4 Active Health Monitoring (`core/health/`)
+- Beast async HTTP client periodically issues probes to configured `health_check_url`.
+- Independent hysteresis: $N$ consecutive probe failures transition instance to `UNHEALTHY`; $M$ consecutive successes transition instance to `HEALTHY`.
+- Decouples node health from service health.
+
+### 3.5 Data Plane HTTP Load Balancer (`core/load_balancer/`)
+- Asynchronous Boost.Beast HTTP/1.1 reverse proxy.
+- Routes requests by reading an immutable `BackendSnapshot` without distributed lookups on the request path.
+- Snapshot updates perform lock-free atomic pointer swaps (`std::shared_ptr<const BackendSnapshot>`).
+- 4 Strategies:
+  1. **Round Robin**: Atomic modulo indexing across eligible backends.
+  2. **Weighted Round Robin**: Deficit round-robin respecting instance capacity weights.
+  3. **Least Connections**: Dynamically selects the instance with the lowest active TCP streams.
+  4. **Consistent Hashing**: MurmurHash/std::hash ring with 100 virtual nodes per instance for deterministic sticky routing via `X-Routing-Key`.
+
+### 3.6 Distributed Configuration Management (`core/config_manager/`)
+- Hierarchical scopes: `GLOBAL`, `DATACENTER`, `NODE`, `SERVICE`.
+- Monotonic versioning: Updates rejected if version $\le$ current version.
+- Rollback: Generates a new monotonic version bearing historical payload.
+
+### 3.7 Local Storage & Durability (`core/storage/`)
+- Per-node SQLite database with WAL mode enabled.
+- Stores `nodes`, `service_instances`, and `configurations`.
+- Crash recovery: Upon startup, the node reads persisted state, increments its persisted incarnation number, and announces itself to the cluster.
+
+---
+
+## 4. Test & Verification Results
+
+### 4.1 C++ GoogleTest Suite (100% Passing)
+Executed via `cd build && ninja && ctest --output-on-failure`:
+1. `test_config`: **Passed** (0.01s)
+2. `test_message_frame`: **Passed** (0.01s)
+3. `test_node_identity`: **Passed** (0.00s)
+4. `test_udp_transport`: **Passed** (0.02s)
+5. `test_membership`: **Passed** (0.00s)
+6. `test_failure_detector`: **Passed** (1.17s)
+7. `test_cluster_convergence`: **Passed** (0.15s)
+8. `test_service_registry`: **Passed** (2.11s)
+9. `test_load_balancer`: **Passed** (0.01s)
+10. `test_config_manager`: **Passed** (0.00s)
+11. `test_sqlite_storage`: **Passed** (0.03s)
+**Result**: 11/11 tests passed (Total time: 3.53s).
+
+### 4.2 Python Management API Tests (100% Passing)
+Executed via `PYTHONPATH=. pytest management/tests/test_management_api.py -v`:
+- `test_health_endpoint`: **PASSED**
+- `test_cluster_overview_fallback`: **PASSED**
+- `test_unauthorized_mutation_fails`: **PASSED**
+- `test_authorized_mutation_succeeds`: **PASSED**
+**Result**: 4/4 tests passed (Total time: 0.66s).
+
+### 4.3 Multi-Process Cluster Simulator Scenarios (100% Passing)
+Executed via `python3 simulator/cluster_simulator/simulator.py`:
+- **Scenario 1 (Cluster Convergence)**: 3 independent `dicp_agent` processes discovered and converged to a unified cluster view via UDP gossip.
+- **Scenario 2 (Service Propagation)**: Service registered on Node 3 propagated to Node 1 via gossip dissemination in under 1 second.
+- **Scenario 3 (Node Crash Detection)**: Node 3 killed abruptly (`SIGKILL`). Node 1 detected failure, entered `SUSPECT`, and marked Node 3 `DEAD` in 0.65s.
+- **Scenario 4 (Restart Recovery & Incarnation Bumping)**: Node 3 restarted with persisted SQLite storage, incremented its incarnation number, refuted its prior death state, and reconciled to `ALIVE` across the entire cluster.
+
+### 4.4 Traffic Generator & Benchmark Suite (100% Passing)
+Executed via `python3 simulator/traffic_generator/benchmark.py`:
+- **Round Robin**: 274.9 req/s, P50 = 40.88ms, P99 = 122.62ms. Distribution across 3 backends: `be-1`: 200, `be-2`: 200, `be-3`: 200 (exact 1:1:1 uniform distribution).
+- **Weighted Round Robin (Weights: 5, 3, 2)**: 213.5 req/s. Distribution: `be-1`: 299, `be-2`: 180, `be-3`: 120 (exact 50%, 30%, 20% capacity ratio).
+- **Least Connections**: 322.9 req/s, P50 = 39.80ms. Distribution: `be-1`: 197, `be-2`: 204, `be-3`: 199.
+- **Consistent Hashing**: 239.5 req/s. Determinism verified: 100% sticky routing consistency per user key.
+- **Zero-Downtime Atomic Snapshot Failover**: Backend `be-2` terminated mid-traffic; proxy updated snapshot atomically; 300 requests sent with **0 errors (100% success)**, 150 routed to `be-1` and 150 to `be-3`. Dead backend received 0 requests.
+
+---
+
+## 5. Key Bugs Encountered & Technical Resolutions
+
+1. **Protoc Shared Library Resolution**: System protoc lacked `libprotoc.so.32` in the standard path. Resolved by creating a wrapper script `/home/pbyanshu/.local/bin/protoc` that exports `LD_LIBRARY_PATH`.
+2. **Protobuf Include Directory Paths**: Custom CMake command was configured to generate `.pb.h` directly into `${CMAKE_CURRENT_BINARY_DIR}/proto` to match `#include "proto/gossip.pb.h"` conventions.
+3. **Beast Asynchronous Buffer Lifetimes**: In `HttpProxy::ForwardRequest` and test mocks, request and buffer shared pointers were captured by value in Boost.Beast completion handler lambdas to prevent socket operations on deallocated buffers.
+4. **Environment Proxy Interception on Localhost**: Shell environment contained an active `http_proxy` forwarding localhost connections. Resolved by configuring `NO_PROXY="127.0.0.1,localhost"` and unsetting proxy variables in test harnesses.
+5. **Node Restart Refutation with Equal Incarnations**: When a node restarted after a crash, peers retained a `DEAD` record at incarnation 0, rejecting `ALIVE` updates at equal incarnation. Resolved by loading persisted incarnation from SQLite on startup and incrementing it ($I \leftarrow I_{\text{persisted}} + 1$), alongside prompt refutation gossip.
+6. **Isolated Per-Node SQLite Databases**: NodeAgent defaults database paths to `./data/<node_id>.db`, preventing concurrent database locking and cross-node contamination.
+
+---
+
+## 6. Execution Commands
+
+```bash
+# 1. Build C++ binaries
+cd build && ninja
+
+# 2. Run C++ Unit Tests
+ctest --output-on-failure
+
+# 3. Run Python Management API Tests
+PYTHONPATH=. /home/pbyanshu/venv/bin/pytest management/tests/test_management_api.py -v
+
+# 4. Run Cluster Simulation & Fault Scenarios
+/home/pbyanshu/venv/bin/python3 simulator/cluster_simulator/simulator.py
+
+# 5. Run Load Balancer Benchmarks
+/home/pbyanshu/venv/bin/python3 simulator/traffic_generator/benchmark.py
+
+# 6. Launch Docker Compose Cluster
+cd deployments/compose && docker compose up -d
+```

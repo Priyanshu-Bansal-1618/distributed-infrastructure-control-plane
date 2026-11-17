@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package dicp.proto;
+
+import "common.proto";
+
+message NodeRecord {
+  string node_id = 1;
+  string boot_id = 2;
+  string hostname = 3;
+  string advertised_address = 4;
+  uint32 gossip_port = 5;
+  uint32 sync_port = 6;
+  uint32 management_port = 7;
+  uint64 incarnation = 8;
+  NodeStatus status = 9;
+  map<string, string> metadata = 10;
+  uint64 record_version = 11;
+  uint64 last_seen_unix_ms = 12;
+}
+
+message NodeUpdate {
+  string node_id = 1;
+  uint64 incarnation = 2;
+  NodeStatus status = 3;
+  uint64 record_version = 4;
+  string advertised_address = 5;
+  uint32 gossip_port = 6;
+  uint32 sync_port = 7;
+  uint32 management_port = 8;
+}

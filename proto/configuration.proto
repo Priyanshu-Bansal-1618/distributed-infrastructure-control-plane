@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package dicp.proto;
+
+enum ConfigScope {
+  SCOPE_CLUSTER = 0;
+  SCOPE_SERVICE = 1;
+  SCOPE_NODE = 2;
+}
+
+message ConfigRecord {
+  string config_id = 1;
+  string config_key = 2;
+  string config_value = 3;
+  ConfigScope scope = 4;
+  string target = 5;
+  uint64 version = 6;
+  string author = 7;
+  uint64 updated_at_unix_sec = 8;
+}
+
+message ConfigUpdate {
+  ConfigRecord record = 1;
+}

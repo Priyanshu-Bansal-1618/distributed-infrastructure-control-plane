@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package dicp.proto;
+
+import "membership.proto";
+import "registry.proto";
+import "configuration.proto";
+
+enum MessageType {
+  MSG_UNKNOWN = 0;
+  MSG_PING = 1;
+  MSG_ACK = 2;
+  MSG_PING_REQ = 3;
+  MSG_ACK_RELAY = 4;
+  MSG_GOSSIP_BATCH = 5;
+  MSG_SYNC_REQUEST = 6;
+  MSG_SYNC_RESPONSE = 7;
+}
+
+message PingMessage {
+  string probe_id = 1;
+  string target_node_id = 2;
+  uint64 sender_incarnation = 3;
+}
+
+message AckMessage {
+  string probe_id = 1;
+  string responder_node_id = 2;
+  uint64 responder_incarnation = 3;
+}
+
+message PingReqMessage {
+  string probe_id = 1;
+  string target_node_id = 2;
+  string target_address = 3;
+  uint32 target_gossip_port = 4;
+}
+
+message AckRelayMessage {
+  string probe_id = 1;
+  string target_node_id = 2;
+  bool success = 3;
+}
+
+message GossipBatch {
+  repeated NodeUpdate node_updates = 1;
+  repeated ServiceUpdate service_updates = 2;
+  repeated ConfigUpdate config_updates = 3;
+}
+
+message SyncPayload {
+  repeated NodeRecord nodes = 1;
+  repeated ServiceInstanceRecord services = 2;
+  repeated ConfigRecord configs = 3;
+}
+
+message Envelope {
+  uint32 protocol_version = 1;
+  string sender_node_id = 2;
+  string message_id = 3;
+  uint64 sender_sequence = 4;
+  MessageType type = 5;
+
+  PingMessage ping = 6;
+  AckMessage ack = 7;
+  PingReqMessage ping_req = 8;
+  AckRelayMessage ack_relay = 9;
+  GossipBatch gossip_batch = 10;
+  SyncPayload sync_payload = 11;
+}

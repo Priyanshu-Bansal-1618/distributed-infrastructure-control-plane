@@ -1,0 +1,233 @@
+Decentralized architectures often struggle with coordination due to node failures and dynamic configurations, leading to single points of failure with traditional systems. This approach addresses the problem through a peer-to-peer
+  control plane (SWIM gossip) for failure detection and service registry, coupled with an asynchronous data plane (HTTP proxy). The system leverages automatic node discovery, gossip probes for rapid failure detection, and a decentralized
+  service registry using heartbeats and soft-deletes.
+  
+  
+  The system independently monitors service health via HTTP, distinct from node health, and integrates healthy instances into versioned snapshots that are atomically swapped into an HTTP reverse proxy, employing various routing
+  strategies. This includes versioned, scoped configuration with conflict resolution and rollback, along with local SQLite persistence for state recovery, and accessible REST management APIs, metrics, and dashboards. The design
+  differentiates between a control plane (`dicp_agent`) and data plane (`dicp_lb`), managing state transfer through service registration, gossip, health checks, snapshot ingestion, and proxying client requests without registry queries.
+  
+  
+  The core components encompass a unique node identity, an orchestrating agent managing the event loop, and an HTTP server exposing APIs and metrics. Cluster membership utilizes a state machine and conflict resolution, implemented with
+  SWIM for failure detection. Service discovery utilizes a randomized peer fanout with a deduplication cache. Healthy service endpoints are monitored via HTTP health checks. Load balancing employs strategies such as round robin, weighted
+  round robin, least connections, and consistent hash routing.
+  
+  
+  The system uses a Boost.Beast reverse proxy with lock-free atomic snapshot swapping for the data plane, including endpoints for administration, strategy management, and metrics. Configuration management employs scoped key-values with
+  monotonic versioning and rollback capabilities, supported by an embedded SQLite database for atomic crash recovery. The management layer provides bearer token authentication, cluster aggregation, and service management features.
+  Monitoring is integrated with Prometheus and Grafana for alert rules and dashboards, while a cluster simulator includes traffic generation and benchmarking.
+  
+  A key technical accomplishment is the decoupling of the control and data planes using lock-free atomic snapshots for zero lock contention. The system implements a SWIM protocol with suspicion and monotonic incarnation refutation to
+  handle transient network issues. Node and service health are decoupled, allowing individual services to fail without affecting the entire node's status, employing tombstones with anti-entropy to prevent resurrection bugs.
+   Distributed Infrastructure Control Plane (DICP): Architecture, Components, and Engineering Deep-Dive 
+  ──────
+  ## 1. What Problem Does This System Solve?
+
+  In modern cloud-native architectures, large-scale web applications are split into dozens or hundreds of microservices running across multiple servers, virtual machines, or containers. Operating such an environment introduces several
+  classic distributed systems challenges:
+
+  1. How do machines know who is in the cluster without a single point of failure?
+      • Traditional approach: Centralized databases (like ZooKeeper or etcd).
+      • Problem: If the centralized coordinator goes down or experiences a network partition, the entire cluster freezes or loses write capability.
+      • DICP Solution: A completely decentralized, peer-to-peer control plane where every node talks to random peers using the SWIM gossip protocol. There is no master node and no single point of failure.
+  2. How do you detect crashed nodes quickly without false alarms?
+      • Problem: Simple heartbeats over the internet or cloud networks suffer from packet loss and transient latency spikes. If you declare a node dead too aggressively, you cause catastrophic cascading failovers.
+      • DICP Solution: A two-tier failure detector (Direct Ping + Indirect Relay Ping-Req + Suspicion Timers). If a node fails a direct ping, other nodes are asked to probe it. If they also fail, the node is put on "suspicion." Only
+      after a grace period is it marked dead. If the node is actually alive, it refutes the rumor by bumping its incarnation number.
+  3. How do you route traffic without slowing down user requests?
+      • Problem: Traditional service meshes often query a remote registry on every single incoming HTTP request, introducing network hops and lock contention.
+      • DICP Solution: Strict Control-Plane / Data-Plane separation. The HTTP load balancer operates entirely in memory using immutable, versioned backend snapshots. Routing a request takes zero network lookups and zero mutex locks.
+  4. How do you keep services alive and evict dead services?
+      • Problem: A physical machine may be 100% healthy, but an application running on port 8080 inside it may have crashed or locked up.
+      • DICP Solution: Node health is decoupled from service health. Node agents actively probe local services over HTTP with hysteresis (requiring multiple failures before evicting, and multiple successes before restoring). Expired
+      services are marked with tombstones so they do not accidentally get resurrected by out-of-order gossip messages.
+
+  ──────
+  ## 2. High-Level Architecture: Control Plane vs. Data Plane
+
+  The system is fundamentally divided into two independent layers:
+
+                                [ CLIENT TRAFFIC ]
+                                        │ HTTP Requests
+                                        ▼
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │                        DATA PLANE (dicp_lb)                            │
+    │                                                                        │
+    │   • Boost.Beast Asynchronous HTTP Reverse Proxy                        │
+    │   • Lock-Free Routing using std::shared_ptr<const BackendSnapshot>     │
+    │   • 4 Strategies: Round Robin, Weighted RR, Least Conn, Consistent Hash│
+    │   • Atomic Snapshot Swap (Zero lookups on request path)                │
+    └───────────────────────────────────┬────────────────────────────────────┘
+                                        │ Reads snapshot in memory
+                                        ▼
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │                      CONTROL PLANE (dicp_agent)                        │
+    │                                                                        │
+    │   ┌────────────────────┐ ┌────────────────────┐ ┌──────────────────┐   │
+    │   │   NODE AGENT 1     │ │    NODE AGENT 2    │ │   NODE AGENT 3   │   │
+    │   │ • UDP Gossip Engine│ │ • UDP Gossip Engine│ │ • UDP Gossip     │   │
+    │   │ • SWIM Failure Det.│ │ • SWIM Failure Det.│ │ • SWIM Failure   │   │
+    │   │ • Service Registry │ │ • Service Registry │ │ • Service Reg.   │   │
+    │   │ • Health Monitor   │ │ • Health Monitor   │ │ • Health Monitor │   │
+    │   │ • SQLite WAL Store │ │ • SQLite WAL Store │ │ • SQLite Store   │   │
+    │   └─────────┬──────────┘ └─────────┬──────────┘ └────────┬─────────┘   │
+    │             │                      │                     │             │
+    │             └─────────── UDP Gossip (Port 9000) ─────────┘             │
+    └───────────────────────────────────┬────────────────────────────────────┘
+                                        │ REST /metrics Scrapes
+                                        ▼
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │                     OBSERVABILITY & MANAGEMENT                         │
+    │                                                                        │
+    │   • FastAPI Management API (Bearer Token Authenticated REST)           │
+    │   • Prometheus Server (Scrapes Node Agents :9002 & Load Balancer :80)  │
+    │   • Grafana Dashboards (Visualizes cluster state, latency, and routing)│
+    └────────────────────────────────────────────────────────────────────────┘
+  ──────
+  ## 3. Subsystem Breakdown and Functionality
+  ### 3.1 Networking & Wire Protocol (core/networking/)
+  • MessageFrame: Network packets sent over UDP cannot be arbitrary blobs. Every packet is wrapped in a strict binary frame:
+      • Magic Bytes: 0x44494350 ("DICP" in ASCII) to discard noise/foreign packets.
+      • Protocol Version (1 byte), Message Type (2 bytes), Payload Length (4 bytes), and CRC32 Checksum (4 bytes).
+      • Maximum Transmission Unit (MTU) enforcement: Any UDP datagram larger than 1200 bytes is rejected to prevent IP fragmentation over WAN.
+  • UdpTransport: Implements non-blocking, asynchronous UDP sockets using Boost.Asio. Handles continuous reading and queued asynchronous sending without blocking the thread.
+  • TcpTransport: Length-prefixed framed TCP transport used when two nodes perform bulk Anti-Entropy Synchronization (transferring large membership lists and service tables that exceed UDP MTU).
+  ### 3.2 Cluster Membership & SWIM Failure Detection (core/membership/, core/gossip/)
+  • NodeIdentity: Represents a node's identity in the cluster. It holds a unique Node ID, an ephemeral Boot UUID (generated afresh on every startup), network ports, and an atomic Incarnation Number (used for refuting false rumors).
+  • MembershipManager: Maintains the local view of all nodes in the cluster and executes deterministic conflict resolution:
+      • Rule 1 (Higher Incarnation Wins): If an update arrives with an incarnation number higher than our local record, the higher incarnation always wins.
+      • Rule 2 (Equal Incarnation Precedence): When incarnation numbers are equal, the state machine resolves strictly as:
+    DEAD > SUSPECT > ALIVE
+    Graceful departure (LEFT) is an absorbing final state.
+
+  • FailureDetector (SWIM Protocol):
+      1. Direct Ping: Node A randomly picks Node B and sends a MSG_PING.
+      2. Indirect Ping-Req: If Node B does not answer within probe_timeout_ms (e.g. 80ms), Node A selects k other random peers (C, D) and sends MSG_PING_REQ. Nodes C and D attempt to ping B on A's behalf.
+      3. Suspicion State: If nobody can reach B, Node B is not immediately killed. Instead, it is marked SUSPECT and a suspicion timer starts.
+      4. Refutation: If Node B is actually alive (e.g. its link to A was temporarily slow), B hears the rumor that it is SUSPECT. B immediately refutes this by incrementing its incarnation number (I_{new} = I_{old} + 1) and
+      broadcasting ALIVE with the new incarnation.
+      5. Dead Declaration: If Node B never refutes within suspicion_timeout_ms, it transitions to DEAD.
+  • GossipEngine & DisseminationQueue:
+      • Implements randomized peer fanout (f = 3).
+      • Instead of broadcasting state changes to every server (which creates O(N²) network flood), updates are pushed to a priority queue and piggybacked on regular gossip pings to random peers.
+      • Deduplication Cache: Remembers recently seen message UUIDs so identical messages are never processed or forwarded twice.
+      • Fast Bootstrap: When a new node joins and contacts a seed, the seed replies immediately with its full membership view, allowing convergence in 1 RTT.
+
+
+  ### 3.3 Replicated Service Registry (core/registry/)
+  • ServiceRegistry: Manages service instances (e.g., payment-service at 10.0.0.5:8080).
+  • Heartbeat Leases: Every service registration has a Time-To-Live (TTL, default 10 seconds). Services must periodically renew their lease.
+  • Lease Expiration: If a service crashes and stops renewing, CheckLeaseExpirations() flags it as expired.
+  • Tombstones: In an eventually consistent gossip network, simply deleting a key causes bugs (an older gossip packet from a lagging peer could resurrect the deleted service). DICP replaces expired services with a Tombstone for 60
+  seconds. Peers learn that the service was explicitly deleted. After 60 seconds, the tombstone is safely purged.
+
+  ### 3.4 Active Health Monitoring (core/health/)
+
+  • HealthMonitor: Decouples the physical machine's health from the service's health.
+  • Runs an asynchronous Boost.Beast HTTP client that polls the /health endpoint of registered services.
+  • Hysteresis Filtering:
+      • Requires N consecutive failures (e.g., 3) before marking a service UNHEALTHY.
+      • Requires M consecutive successes (e.g., 2) before restoring it to HEALTHY.
+      • Prevents "flapping" (services flickering between up and down due to transient hiccups).
+
+  ### 3.5 Asynchronous Data Plane & HTTP Load Balancer (core/load_balancer/)
+
+  • BackendSnapshot: An immutable snapshot containing only healthy, eligible backend endpoints. When services change in the control plane, a new snapshot is constructed and swapped into the proxy.
+  • HttpProxy: An asynchronous HTTP reverse proxy built on Boost.Beast.
+      • Request path is completely lock-free:
+        auto snap = GetCurrentSnapshot(); // std::atomic_load of std::shared_ptr
+	auto endpoints = snap->GetEndpoints(service_name);
+
+      • Incoming requests are proxied directly to selected backends with zero registry lock contention.
+      • Includes administrative endpoints:
+	  • POST /admin/snapshot: Ingests an updated routing snapshot dynamically.
+	  • POST /admin/strategy: Dynamically switches load balancing algorithms without restarting the process.
+	  • /metrics: Native Prometheus exporter for proxy throughput and error counts.
+
+  • 4 Load Balancing Strategies:
+      1. Round Robin: Cycles through backends uniformly using atomic integer addition.
+      2. Weighted Round Robin: Respects backend capacity weights (e.g., 5:3:2) using smooth deficit round-robin.
+      3. Least Connections: Inspects active_connections.load() across backends in real time and routes to the backend currently processing the fewest active requests.
+      4. Consistent Hashing: Hashes request keys (e.g. X-Routing-Key header or user ID) across a 100-virtual-node ring. Guarantees that the same user/session always routes to the exact same backend server, with minimal key disruption
+      if a backend joins or leaves.
+
+
+  ### 3.6 Distributed Configuration Management (core/config_manager/)
+
+  • ConfigurationManager: Distributes configuration key-values across the cluster.
+  • Hierarchical Scopes: Supports GLOBAL, DATACENTER, NODE, and SERVICE scopes.
+  • Monotonic Versioning: Every update increments a 64-bit version number. Stale updates with older or equal versions are deterministically rejected.
+  • Auditable Rollback: Reverting a configuration does not delete history. It writes a new higher version number containing the historical payload, ensuring clean forward replication.
+  ### 3.7 Durability & Persistence (core/storage/)
+
+  • SqliteStorage: Manages an embedded SQLite database on each node.
+  • Configured with PRAGMA journal_mode = WAL (Write-Ahead Logging) and PRAGMA synchronous = NORMAL, allowing concurrent reads while writes take place.
+  • All SQL operations use compiled prepared statements with typed bindings (sqlite3_bind_*), preventing SQL injection.
+  • Crash Recovery: When a node crashes (e.g., power loss or SIGKILL) and restarts, it reads its saved records from SQLite, increments its persisted incarnation number (I ← I + 1), and restarts cleanly without state loss.
+  ### 3.8 Management API (management/)
+  • Written in Python 3.12 using FastAPI and Pydantic v2.
+  • Exposes authenticated REST endpoints (/api/v1/cluster/members, /api/v1/cluster/services/register, /api/v1/cluster/config).
+  • Secured via HTTP Bearer token authentication verified with constant-time comparison (secrets.compare_digest) to prevent timing attacks.
+  ### 3.9 Observability & Monitoring (monitoring/)
+
+  • Prometheus: Native scraping of Node Agent management ports (:9002) and Load Balancer metrics (:80).
+  • Alert Rules (cluster_alerts.yml): Pre-configured alert rules for NodeMarkedDead, NodeUnderSuspicion, and NoHealthyBackends.
+  • Grafana: Pre-provisioned dashboards visualizing active node count, healthy service instances, gossip transmission rates, and proxy latency percentiles.
+  ──────
+  ## 4. Key Technical & Engineering Highlights
+
+  Here are the most significant systems engineering challenges addressed in this project:
+
+  ### 1. Lock-Free Read Path via Immutable Snapshots
+
+  In high-throughput proxies, acquiring a mutex lock on every incoming request to check backend health ruins multi-core scalability.
+
+  • Engineering solution: Backends are stored in a const BackendSnapshot wrapped in std::shared_ptr.
+  • Reading the snapshot is a lock-free atomic load:
+    std::shared_ptr<const BackendSnapshot> snap = std::atomic_load(&snapshot_);
+
+  • When the control plane updates backends, it allocates a new snapshot and atomically replaces the pointer. In-flight requests continue reading the old snapshot safely through reference counting, while new requests immediately use
+  the new snapshot. There is zero lock contention.
+
+  ### 2. SWIM Refutation and Incarnation Bumping
+
+  A major trap in distributed failure detectors is when a slow network link causes healthy nodes to be wrongfully declared dead.
+
+  • Engineering solution: Suspicion state + refutation. If Node 3 hears that Node 1 suspects it at incarnation k, Node 3 immediately bumps its incarnation to k + 1 and broadcasts an ALIVE message. Because k + 1 > k, all nodes in the
+  cluster immediately overwrite the suspicion and restore Node 3 to healthy status.
+
+  ### 3. Restart Recovery with Persistent Incarnations
+
+  When a node crashes and boots back up from scratch, other nodes in the cluster may still remember it as DEAD at incarnation k. If the restarted node begins with incarnation 0, the cluster ignores its ALIVE messages because DEAD(k) >
+  ALIVE(0).
+
+  • Engineering solution: On startup, NodeAgent queries local SQLite storage. If it finds its own previous record, it initializes its incarnation to k + 1. Additionally, if peers receive an ALIVE ping from a node they thought was DEAD,
+  they prompt the sender with a refute challenge, causing the restarted node to immediately bump its incarnation and reconcile.
+
+  ### 4. Zero-Copy Boost.Beast Async Buffer Lifetime Safety
+
+  Asynchronous Boost.Beast pipelines pass socket buffers through chained completion handlers (async_read → async_write). A common C++ bug is passing http::request or flat_buffer by reference into a lambda: if the enclosing function
+  returns, the stack buffer is destroyed while the kernel is still performing the asynchronous socket operation, leading to silent memory corruption or SIGSEGV.
+
+  • Engineering solution: All async pipelines capture req, buffer, and stream by value as std::shared_ptr inside every completion lambda capture list, ensuring the memory remains alive until the OS kernel completes the I/O transfer.
+
+  ### 5. Measured Load Balancing Performance
+
+  Rather than using mocked numbers, the system was validated using an automated multi-threaded benchmarking harness (simulator/traffic_generator/benchmark.py) against live C++ binaries:
+
+  • Round Robin: Exactly 200 / 200 / 200 requests (33.33% each) across 600 requests.
+  • Weighted Round Robin (Weights: 5, 3, 2): Exactly 300 / 180 / 120 requests (50.0% / 30.0% / 20.0%) conforming precisely to weights.
+  • Zero-Downtime Atomic Failover: When a backend was terminated mid-stream and the snapshot was swapped, 300 requests were sent with 0 failed requests (100% success), and zero traffic leaked to the dead instance.
+  ──────
+  ## 5. Summary of How Everything Connects
+
+    1. Service boots up ────────► Registers with local NodeAgent via REST API
+    2. NodeAgent updates ───────► Adds instance with TTL lease to local ServiceRegistry
+    3. Gossip Engine ───────────► Disseminates registration to other nodes via UDP gossip
+    4. Health Monitor ──────────► Periodically sends HTTP probes to service /health
+    5. Healthy Instances ───────► Aggregated into an immutable BackendSnapshot
+    6. HTTP Load Balancer ──────► Atomically reads BackendSnapshot & routes client requests
+    7. Prometheus / Grafana ────► Scrapes /metrics every 2 seconds for real-time observability
+    8. Node crash occurs ───────► SWIM failure detector detects missing ACK -> SUSPECT -> DEAD
+    9. Snapshot updates ────────► Dead backend evicted with zero dropped client requests
+

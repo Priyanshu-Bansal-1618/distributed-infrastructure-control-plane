@@ -1,0 +1,145 @@
+version: '3.8'
+
+networks:
+  dicp-cluster:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+  node-agent-1:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.agent
+    container_name: dicp-node-agent-1
+    command: ["/app/config/node1.json"]
+    volumes:
+      - ../configs/node1.json:/app/config/node1.json:ro
+      - node1-data:/app/data
+    ports:
+      - "9002:9002"   # Management REST & Metrics
+      - "9000:9000/udp"
+    networks:
+      - dicp-cluster
+
+  node-agent-2:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.agent
+    container_name: dicp-node-agent-2
+    command: ["/app/config/node2.json"]
+    volumes:
+      - ../configs/node2.json:/app/config/node2.json:ro
+      - node2-data:/app/data
+    depends_on:
+      - node-agent-1
+    ports:
+      - "9102:9002"
+      - "9100:9000/udp"
+    networks:
+      - dicp-cluster
+
+  node-agent-3:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.agent
+    container_name: dicp-node-agent-3
+    command: ["/app/config/node3.json"]
+    volumes:
+      - ../configs/node3.json:/app/config/node3.json:ro
+      - node3-data:/app/data
+    depends_on:
+      - node-agent-1
+    ports:
+      - "9202:9002"
+      - "9200:9000/udp"
+    networks:
+      - dicp-cluster
+
+  backend-1:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.backend
+    container_name: dicp-backend-1
+    environment:
+      - SERVICE_NAME=order-service
+      - INSTANCE_ID=order-service-inst-1
+      - PORT=8080
+    networks:
+      - dicp-cluster
+
+  backend-2:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.backend
+    container_name: dicp-backend-2
+    environment:
+      - SERVICE_NAME=order-service
+      - INSTANCE_ID=order-service-inst-2
+      - PORT=8080
+    networks:
+      - dicp-cluster
+
+  load-balancer:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.agent
+    container_name: dicp-load-balancer
+    entrypoint: ["/usr/local/bin/dicp_lb", "80", "round_robin"]
+    ports:
+      - "80:80"       # Application traffic & Admin /admin/snapshot
+    depends_on:
+      - backend-1
+      - backend-2
+    networks:
+      - dicp-cluster
+
+  management-api:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.api
+    container_name: dicp-management-api
+    environment:
+      - AGENT_URL=http://node-agent-1:9002
+      - API_TOKEN=secret-token-123
+    ports:
+      - "8000:8000"
+    depends_on:
+      - node-agent-1
+    networks:
+      - dicp-cluster
+
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: dicp-prometheus
+    volumes:
+      - ../../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../monitoring/alerts/cluster_alerts.yml:/etc/prometheus/cluster_alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - dicp-cluster
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: dicp-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ../../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - dicp-cluster

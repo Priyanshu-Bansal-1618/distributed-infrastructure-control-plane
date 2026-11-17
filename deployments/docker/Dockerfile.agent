@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    g++ \
+    cmake \
+    ninja-build \
+    libboost-dev \
+    libboost-system-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libsqlite3-dev \
+    nlohmann-json3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY proto/ ./proto/
+COPY core/ ./core/
+
+RUN cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+RUN cmake --build build --target dicp_agent dicp_lb
+
+# Runtime Stage
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libprotobuf32t64 \
+    libsqlite3-0 \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /src/build/dicp_agent /usr/local/bin/dicp_agent
+COPY --from=builder /src/build/dicp_lb /usr/local/bin/dicp_lb
+
+RUN mkdir -p /app/data && chmod 777 /app/data
+
+EXPOSE 8080 8081 9000/udp 9001 9002
+
+ENTRYPOINT ["/usr/local/bin/dicp_agent"]
+CMD ["/app/config/config.json"]

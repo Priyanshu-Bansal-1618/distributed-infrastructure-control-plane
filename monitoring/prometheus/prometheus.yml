@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+rule_files:
+  - "/etc/prometheus/cluster_alerts.yml"
+
+scrape_configs:
+  - job_name: "dicp_agents"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "node-agent-1:9002"
+          - "node-agent-2:9002"
+          - "node-agent-3:9002"
+        labels:
+          cluster: "dicp-prod"
+
+  - job_name: "dicp_load_balancer"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "load-balancer:80"
+        labels:
+          role: "ingress"

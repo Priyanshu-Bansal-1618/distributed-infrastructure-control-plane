@@ -1,0 +1,27 @@
+{
+  "node": {
+    "id": "node-agent-1",
+    "bind_address": "0.0.0.0",
+    "advertised_address": "node-agent-1"
+  },
+  "network": {
+    "gossip_port": 9000,
+    "sync_port": 9001,
+    "management_port": 9002
+  },
+  "gossip": {
+    "interval_ms": 200,
+    "fanout": 3,
+    "max_message_bytes": 1200
+  },
+  "failure_detection": {
+    "probe_interval_ms": 500,
+    "probe_timeout_ms": 200,
+    "indirect_peers": 3,
+    "suspicion_timeout_ms": 2000
+  },
+  "storage": {
+    "database_path": "/app/data/node1.db"
+  },
+  "seeds": []
+}

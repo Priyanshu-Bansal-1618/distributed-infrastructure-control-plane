@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package dicp.proto;
+
+enum NodeStatus {
+  NODE_STATUS_UNKNOWN = 0;
+  NODE_ALIVE = 1;
+  NODE_SUSPECT = 2;
+  NODE_DEAD = 3;
+  NODE_LEFT = 4;
+}
+
+enum HealthStatus {
+  HEALTH_UNKNOWN = 0;
+  HEALTH_HEALTHY = 1;
+  HEALTH_UNHEALTHY = 2;
+  HEALTH_DRAINING = 3;
+}
+
+enum ServiceProtocol {
+  PROTOCOL_HTTP = 0;
+  PROTOCOL_HTTPS = 1;
+}
+
+message Endpoint {
+  string address = 1;
+  uint32 port = 2;
+}

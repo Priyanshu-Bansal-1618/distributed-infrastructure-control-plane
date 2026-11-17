@@ -1,0 +1,1615 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DICP - Observability & Management Dashboard</title>
+  <!-- Tailwind CSS & Lucide Icons via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            axonBg: '#0c1017',
+            axonPanel: '#111620',
+            axonCard: '#161c28',
+            axonBorder: '#212a3b',
+            axonGreen: '#00e676',
+            axonAmber: '#ffab00',
+            axonRed: '#ff1744',
+            axonBlue: '#38bdf8'
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #0c1017;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overflow-x: hidden;
+    }
+    .glow-green {
+      box-shadow: 0 0 15px rgba(0, 230, 118, 0.4);
+    }
+    .glow-amber {
+      box-shadow: 0 0 15px rgba(255, 171, 0, 0.4);
+    }
+    .glow-red {
+      box-shadow: 0 0 15px rgba(255, 23, 68, 0.4);
+    }
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      50% { transform: scale(1.15); opacity: 0.2; }
+      100% { transform: scale(0.95); opacity: 0.8; }
+    }
+    .pulsing-ring {
+      animation: pulse-ring 2s infinite ease-in-out;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: #111620;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #212a3b;
+      border-radius: 3px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: #38bdf8;
+    }
+    .tab-active {
+      border-bottom: 2px solid #38bdf8;
+      color: #38bdf8;
+      font-weight: 600;
+    }
+    .canvas-bg {
+      background-image: radial-gradient(#212a3b 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+  </style>
+</head>
+<body class="h-screen flex flex-col bg-axonBg text-slate-200">
+
+  <!-- TOP HEADER -->
+  <header class="h-14 border-b border-axonBorder bg-axonPanel flex items-center justify-between px-4 z-20">
+    <div class="flex items-center space-x-3">
+      <!-- AxonOps style icon -->
+      <div class="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-axonGreen font-bold text-lg">
+        <i data-lucide="network" class="w-5 h-5 text-axonGreen"></i>
+      </div>
+      <div class="flex items-center space-x-2 text-xs">
+        <span class="text-slate-400 flex items-center hover:text-white cursor-pointer"><i data-lucide="home" class="w-3.5 h-3.5 mr-1"></i> dicp</span>
+        <span class="text-slate-600">/</span>
+        <span class="text-slate-300 font-medium">Cluster Overview</span>
+        <span class="text-slate-600">/</span>
+        <span class="px-2 py-0.5 rounded bg-blue-950/70 border border-blue-500/30 text-axonBlue text-[11px] font-semibold tracking-wider">CLUSTER DICP OVERVIEW</span>
+      </div>
+    </div>
+
+    <!-- View Modes & Controls -->
+    <div class="flex items-center space-x-3">
+      <!-- Add Node Quick Button -->
+      <button onclick="openAddNodeModal()" class="px-3 py-1.5 bg-blue-600/90 hover:bg-blue-500 text-white font-medium rounded text-xs flex items-center space-x-1.5 shadow">
+        <i data-lucide="plus-circle" class="w-3.5 h-3.5"></i>
+        <span>Add Node</span>
+      </button>
+
+      <div class="h-4 w-px bg-axonBorder"></div>
+
+      <div class="flex items-center space-x-1 text-xs">
+        <label for="contextFilter" class="text-slate-400 mr-1 font-medium">Context:</label>
+        <select id="contextFilter" onchange="filterTopologyContext()" class="bg-axonCard border border-axonBorder text-slate-200 rounded px-2.5 py-1 text-xs focus:outline-none focus:border-axonBlue">
+          <option value="all">All Datacenters & Roles</option>
+          <option value="dc_a">Data Center A (LAN Pool)</option>
+          <option value="dc_b">Data Center B (LAN Pool)</option>
+          <option value="server">Control Plane (Servers)</option>
+          <option value="worker">Compute (Workers)</option>
+          <option value="gateway">Edge (Gateways)</option>
+          <option value="database">Storage (Databases)</option>
+          <option value="swim">SWIM Probes & Relays</option>
+        </select>
+      </div>
+
+      <div class="flex items-center space-x-1.5 text-xs text-slate-300">
+        <input type="checkbox" id="alwaysTooltips" onchange="toggleTooltips()" class="accent-axonBlue rounded cursor-pointer" checked>
+        <label for="alwaysTooltips" class="cursor-pointer">Always show tooltips</label>
+      </div>
+
+      <div class="h-4 w-px bg-axonBorder"></div>
+
+      <!-- Live status indicator -->
+      <div id="liveIndicator" class="flex items-center space-x-2 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-500/30 text-axonGreen text-xs">
+        <span class="w-2 h-2 rounded-full bg-axonGreen animate-pulse"></span>
+        <span id="liveText" class="font-medium">Cluster Mesh Live</span>
+      </div>
+
+      <!-- Refresh timer -->
+      <div class="flex items-center space-x-1.5 text-xs text-slate-400 bg-axonCard px-2 py-1 rounded border border-axonBorder">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-axonBlue animate-spin" id="refreshSpinner"></i>
+        <span id="refreshTimer">Auto 1s</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN LAYOUT -->
+  <div class="flex flex-1 overflow-hidden">
+    
+    <!-- LEFT SIDEBAR -->
+    <aside class="w-56 border-r border-axonBorder bg-axonPanel flex flex-col justify-between select-none">
+      <div class="py-3">
+        <div class="px-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Navigation</div>
+        <nav class="space-y-0.5 px-2">
+          <button onclick="switchTab('cluster')" id="nav-cluster" class="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-axonBlue bg-blue-950/40 border border-blue-500/20">
+            <i data-lucide="share-2" class="w-4 h-4 text-axonBlue"></i>
+            <span>Cluster Overview</span>
+          </button>
+          <button onclick="switchTab('telemetry')" id="nav-telemetry" class="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-axonCard">
+            <i data-lucide="activity" class="w-4 h-4"></i>
+            <span>Telemetry Dashboard</span>
+          </button>
+          <button onclick="switchTab('services')" id="nav-services" class="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-axonCard">
+            <i data-lucide="layers" class="w-4 h-4"></i>
+            <span>Service Registry</span>
+          </button>
+          <button onclick="switchTab('lb')" id="nav-lb" class="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-axonCard">
+            <i data-lucide="sliders" class="w-4 h-4"></i>
+            <span>Load Balancer</span>
+          </button>
+          <button onclick="switchTab('events')" id="nav-events" class="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-axonCard">
+            <i data-lucide="scroll-text" class="w-4 h-4"></i>
+            <span>Logs & Events</span>
+          </button>
+          <button onclick="switchTab('chaos')" id="nav-chaos" class="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-axonCard">
+            <i data-lucide="zap" class="w-4 h-4 text-amber-400"></i>
+            <span>Operations & Chaos</span>
+          </button>
+        </nav>
+
+        <div class="px-3 pt-5 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Quick Stats</div>
+        <div class="px-3 space-y-2 text-xs">
+          <div class="flex justify-between items-center text-slate-400">
+            <span>Mesh Nodes</span>
+            <span id="quickNodesCount" class="font-bold text-axonGreen">3</span>
+          </div>
+          <div class="flex justify-between items-center text-slate-400">
+            <span>Services Active</span>
+            <span id="quickServicesCount" class="font-bold text-axonBlue">3</span>
+          </div>
+          <div class="flex justify-between items-center text-slate-400">
+            <span>SWIM Protocol</span>
+            <span class="font-mono text-[11px] text-slate-300">P2P v1.0</span>
+          </div>
+          <div class="flex justify-between items-center text-slate-400">
+            <span>Hot Snapshot</span>
+            <span id="quickSnapshotVersion" class="font-mono text-[11px] text-purple-400">v1</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom badge -->
+      <div class="p-3 border-t border-axonBorder bg-axonCard/40">
+        <div class="flex items-center justify-between text-[11px] text-slate-400">
+          <span>DICP Control Plane</span>
+          <span class="text-xs text-axonGreen">v1.0.0</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER CONTENT AREA -->
+    <main class="flex-1 flex flex-col bg-axonBg overflow-hidden relative">
+      
+      <!-- SUBNAV HEADER: Graph View vs List View (Matches Screenshot) -->
+      <div id="clusterSubnav" class="h-10 border-b border-axonBorder bg-axonCard/60 flex items-center justify-between px-6 z-10">
+        <div class="flex space-x-6 h-full items-center text-xs">
+          <button onclick="setClusterViewMode('graph')" id="btnGraphView" class="h-full flex items-center space-x-1.5 tab-active transition-colors">
+            <i data-lucide="circle-dot" class="w-3.5 h-3.5"></i>
+            <span>GRAPH VIEW</span>
+          </button>
+          <button onclick="setClusterViewMode('list')" id="btnListView" class="h-full flex items-center space-x-1.5 text-slate-400 hover:text-slate-200 transition-colors">
+            <i data-lucide="list" class="w-3.5 h-3.5"></i>
+            <span>LIST VIEW</span>
+          </button>
+        </div>
+        <div class="text-[11px] text-slate-400 flex items-center space-x-4">
+          <div class="flex items-center space-x-2">
+            <span class="text-slate-500 font-semibold uppercase text-[10px] mr-1">Status:</span>
+            <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-axonGreen inline-block mr-1"></span> ALIVE</span>
+            <span class="flex items-center text-amber-400"><span class="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block mr-1 animate-pulse"></span> SUSPECT</span>
+            <span class="flex items-center text-red-400"><span class="w-2.5 h-2.5 rounded-full bg-red-500 inline-block mr-1"></span> DEAD</span>
+          </div>
+          <span class="text-slate-600">|</span>
+          <div class="flex items-center space-x-2.5">
+            <span class="text-slate-500 font-semibold uppercase text-[10px] mr-1">Roles:</span>
+            <span class="flex items-center text-blue-400 font-medium"><span class="w-2.5 h-2.5 rounded bg-blue-600 inline-block mr-1"></span> Server</span>
+            <span class="flex items-center text-emerald-400 font-medium"><span class="w-2.5 h-2.5 rounded bg-emerald-500 inline-block mr-1"></span> Worker</span>
+            <span class="flex items-center text-cyan-400 font-medium"><span class="w-2.5 h-2.5 rounded bg-cyan-500 inline-block mr-1"></span> Gateway</span>
+            <span class="flex items-center text-purple-400 font-medium"><span class="w-2.5 h-2.5 rounded bg-purple-500 inline-block mr-1"></span> Database</span>
+            <span class="flex items-center text-pink-400 font-medium"><span class="w-2.5 h-2.5 rounded bg-pink-500 inline-block mr-1"></span> Cache</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 1: CLUSTER OVERVIEW (GRAPH & LIST VIEW) -->
+      <div id="tab-cluster" class="flex-1 relative flex flex-col overflow-hidden">
+        
+        <!-- GRAPH VIEW CONTAINER -->
+        <div id="view-graph" class="flex-1 relative canvas-bg overflow-hidden flex items-center justify-center">
+          <svg id="topologySvg" class="w-full h-full cursor-grab active:cursor-grabbing"></svg>
+          
+          <!-- Graph overlay watermark/title -->
+          <div class="absolute top-4 left-6 pointer-events-none select-none">
+            <div class="text-sm font-semibold tracking-wider text-slate-300">SWIM GOSSIP MESH TOPOLOGY</div>
+            <div class="text-[11px] text-slate-500">Decentralized P2P Membership & Failure Probes</div>
+          </div>
+
+          <!-- Controls Floating Bar -->
+          <div class="absolute bottom-5 left-6 bg-axonPanel/90 backdrop-blur border border-axonBorder rounded-lg p-1.5 flex items-center space-x-1 text-xs shadow-xl">
+            <button onclick="resetZoom()" class="p-1.5 rounded hover:bg-axonCard text-slate-300 hover:text-white" title="Reset Camera">
+              <i data-lucide="maximize" class="w-4 h-4"></i>
+            </button>
+            <button onclick="recenterPhysics()" class="p-1.5 rounded hover:bg-axonCard text-slate-300 hover:text-white" title="Re-heat Simulation">
+              <i data-lucide="sparkles" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- LIST VIEW CONTAINER -->
+        <div id="view-list" class="flex-1 hidden p-6 overflow-y-auto custom-scrollbar">
+          <div class="bg-axonPanel border border-axonBorder rounded-lg overflow-hidden shadow-lg">
+            <div class="p-4 border-b border-axonBorder flex justify-between items-center">
+              <div>
+                <h3 class="font-semibold text-sm text-slate-200">Cluster Membership & Node States</h3>
+                <p class="text-xs text-slate-400">Click the toggle button on any node to test the live SWIM failure detection protocol</p>
+              </div>
+              <div class="flex space-x-2">
+                <button onclick="openAddNodeModal()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs flex items-center space-x-1">
+                  <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                  <span>Add Node</span>
+                </button>
+                <button onclick="fetchClusterData()" class="px-3 py-1.5 bg-axonCard border border-axonBorder rounded text-xs hover:border-axonBlue flex items-center space-x-1.5">
+                  <i data-lucide="rotate-cw" class="w-3.5 h-3.5"></i>
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+            <table class="w-full text-left text-xs">
+              <thead class="bg-axonCard/80 text-slate-400 border-b border-axonBorder uppercase text-[10px] tracking-wider">
+                <tr>
+                  <th class="px-3 py-3">Node ID</th>
+                  <th class="px-3 py-3">Role / Type</th>
+                  <th class="px-3 py-3">Datacenter</th>
+                  <th class="px-3 py-3">Hosted Services</th>
+                  <th class="px-3 py-3">Physical State</th>
+                  <th class="px-3 py-3">Protocol Status</th>
+                  <th class="px-3 py-3">Incarnation</th>
+                  <th class="px-3 py-3">Ports (G/S/M)</th>
+                  <th class="px-3 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="nodesTableBody" class="divide-y divide-axonBorder/50">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- TAB 2: TELEMETRY DASHBOARD -->
+      <div id="tab-telemetry" class="flex-1 hidden p-6 overflow-y-auto custom-scrollbar space-y-6">
+        <!-- Stat Cards Row -->
+        <div class="grid grid-cols-4 gap-4">
+          <div class="bg-axonPanel border border-axonBorder rounded-lg p-4 relative overflow-hidden shadow">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Alive Cluster Nodes</div>
+            <div id="cardAliveNodes" class="text-3xl font-bold text-axonGreen mt-2">3</div>
+            <div class="text-xs text-slate-500 mt-1">SWIM full mesh active</div>
+            <div class="absolute right-3 top-3 w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center text-axonGreen">
+              <i data-lucide="server" class="w-4 h-4"></i>
+            </div>
+          </div>
+
+          <div class="bg-axonPanel border border-axonBorder rounded-lg p-4 relative overflow-hidden shadow">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Healthy Backends</div>
+            <div id="cardHealthyServices" class="text-3xl font-bold text-axonBlue mt-2">3</div>
+            <div class="text-xs text-slate-500 mt-1">HTTP /health hysteresis passing</div>
+            <div class="absolute right-3 top-3 w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center text-axonBlue">
+              <i data-lucide="check-circle-2" class="w-4 h-4"></i>
+            </div>
+          </div>
+
+          <div class="bg-axonPanel border border-axonBorder rounded-lg p-4 relative overflow-hidden shadow">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Proxy Throughput</div>
+            <div id="cardProxyThroughput" class="text-3xl font-bold text-purple-400 mt-2">266.7 <span class="text-sm font-normal text-slate-400">rps</span></div>
+            <div class="text-xs text-slate-500 mt-1">Lock-free atomic snapshot swap</div>
+            <div class="absolute right-3 top-3 w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center text-purple-400">
+              <i data-lucide="zap" class="w-4 h-4"></i>
+            </div>
+          </div>
+
+          <div class="bg-axonPanel border border-axonBorder rounded-lg p-4 relative overflow-hidden shadow">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">P99 Latency</div>
+            <div id="cardProxyLatency" class="text-3xl font-bold text-amber-400 mt-2">45.1 <span class="text-sm font-normal text-slate-400">ms</span></div>
+            <div class="text-xs text-slate-500 mt-1">Boost.Beast asynchronous pipeline</div>
+            <div class="absolute right-3 top-3 w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-400">
+              <i data-lucide="clock" class="w-4 h-4"></i>
+            </div>
+          </div>
+        </div>
+
+        <!-- Telemetry Charts -->
+        <div class="grid grid-cols-2 gap-6">
+          <div class="bg-axonPanel border border-axonBorder rounded-lg p-4 shadow">
+            <div class="flex justify-between items-center mb-3">
+              <h4 class="text-xs font-semibold text-slate-300 uppercase tracking-wider">Request Distribution Across Backends</h4>
+              <span class="text-[11px] px-2 py-0.5 rounded bg-blue-950/60 border border-blue-500/30 text-axonBlue" id="currentStrategyBadge">round_robin</span>
+            </div>
+            <div class="h-64">
+              <canvas id="trafficDistributionChart"></canvas>
+            </div>
+          </div>
+
+          <div class="bg-axonPanel border border-axonBorder rounded-lg p-4 shadow">
+            <div class="flex justify-between items-center mb-3">
+              <h4 class="text-xs font-semibold text-slate-300 uppercase tracking-wider">Gossip Rate & SWIM Failure Probes</h4>
+              <span class="text-[11px] text-slate-400 font-mono">interval=100ms, fanout=3</span>
+            </div>
+            <div class="h-64">
+              <canvas id="gossipProbesChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: SERVICE REGISTRY -->
+      <div id="tab-services" class="flex-1 hidden p-6 overflow-y-auto custom-scrollbar space-y-6">
+        <div class="flex justify-between items-center">
+          <div>
+            <h3 class="font-semibold text-sm text-slate-200">Replicated Service Registry</h3>
+            <p class="text-xs text-slate-400">Services hold heartbeat TTL leases; expired services leave tombstones to prevent resurrection</p>
+          </div>
+          <button onclick="openRegisterModal()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded text-xs flex items-center space-x-1.5 shadow">
+            <i data-lucide="plus" class="w-4 h-4"></i>
+            <span>Register New Service</span>
+          </button>
+        </div>
+
+        <div class="bg-axonPanel border border-axonBorder rounded-lg overflow-hidden shadow-lg">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-axonCard text-slate-400 border-b border-axonBorder uppercase text-[10px] tracking-wider">
+              <tr>
+                <th class="px-4 py-3">Service Name</th>
+                <th class="px-4 py-3">Instance ID</th>
+                <th class="px-4 py-3">Owner Node</th>
+                <th class="px-4 py-3">Endpoint (Host:Port)</th>
+                <th class="px-4 py-3">Weight</th>
+                <th class="px-4 py-3">Health Probe</th>
+                <th class="px-4 py-3">Lease TTL</th>
+                <th class="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="servicesTableBody" class="divide-y divide-axonBorder/50">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 4: LOAD BALANCER -->
+      <div id="tab-lb" class="flex-1 hidden p-6 overflow-y-auto custom-scrollbar space-y-6">
+        <div class="bg-axonPanel border border-axonBorder rounded-lg p-5 shadow space-y-4">
+          <div class="flex justify-between items-center border-b border-axonBorder pb-4">
+            <div>
+              <h3 class="font-semibold text-sm text-slate-200">Data Plane Strategy & Ingress Router</h3>
+              <p class="text-xs text-slate-400">Zero distributed queries on the request path. Dynamically swap routing algorithms in real time.</p>
+            </div>
+            <div class="flex items-center space-x-2">
+              <span class="text-xs text-slate-400">Active Algorithm:</span>
+              <select id="lbStrategySelect" onchange="applyStrategyChange()" class="bg-axonCard border border-axonBorder rounded px-3 py-1.5 text-xs text-axonBlue font-semibold focus:outline-none focus:border-axonBlue">
+                <option value="round_robin">Round Robin (1:1 Uniform)</option>
+                <option value="weighted_round_robin">Weighted Round Robin (Capacity Weighted)</option>
+                <option value="least_connections">Least Connections (Lowest Active TCP Streams)</option>
+                <option value="consistent_hash">Consistent Hashing (Sticky Routing Key)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Traffic Generator Tool -->
+          <div class="grid grid-cols-3 gap-6 pt-2">
+            <div class="col-span-1 bg-axonCard p-4 rounded-lg border border-axonBorder space-y-3">
+              <div class="text-xs font-semibold text-slate-300 flex items-center space-x-1.5">
+                <i data-lucide="send" class="w-3.5 h-3.5 text-axonBlue"></i>
+                <span>Fire Test Traffic</span>
+              </div>
+              <div class="space-y-2 text-xs">
+                <div>
+                  <label class="text-slate-400 block mb-1">Target Service:</label>
+                  <input type="text" id="trafficServiceInput" value="order-service" class="w-full bg-axonPanel border border-axonBorder rounded px-2.5 py-1 text-slate-200">
+                </div>
+                <div>
+                  <label class="text-slate-400 block mb-1">Request Batch Size:</label>
+                  <select id="trafficCountSelect" class="w-full bg-axonPanel border border-axonBorder rounded px-2.5 py-1 text-slate-200">
+                    <option value="15">15 Concurrent Requests</option>
+                    <option value="60">60 Concurrent Requests</option>
+                    <option value="150">150 Concurrent Requests</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="text-slate-400 block mb-1">Sticky Routing Key (Consistent Hash):</label>
+                  <input type="text" id="trafficKeyInput" placeholder="e.g. user_alice" class="w-full bg-axonPanel border border-axonBorder rounded px-2.5 py-1 text-slate-200">
+                </div>
+                <button onclick="sendTestTraffic()" id="btnSendTraffic" class="w-full mt-2 py-2 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded text-xs transition-colors flex items-center justify-center space-x-1.5">
+                  <i data-lucide="play" class="w-3.5 h-3.5"></i>
+                  <span>Send Request Burst</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="col-span-2 bg-axonCard p-4 rounded-lg border border-axonBorder flex flex-col justify-between">
+              <div>
+                <div class="text-xs font-semibold text-slate-300 mb-2 flex justify-between">
+                  <span>Measured Distribution on Backends</span>
+                  <span id="trafficBatchSummary" class="text-slate-400 font-normal">Ready</span>
+                </div>
+                <div id="trafficResultsBars" class="space-y-3 mt-4">
+                  <!-- Animated progress bars -->
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="font-mono text-slate-300">be-1 (Weight: 5)</span>
+                      <span id="val-be-1" class="font-bold text-axonGreen">0 reqs (0%)</span>
+                    </div>
+                    <div class="w-full bg-axonPanel rounded-full h-3 border border-axonBorder overflow-hidden">
+                      <div id="bar-be-1" class="bg-axonGreen h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="font-mono text-slate-300">be-2 (Weight: 3)</span>
+                      <span id="val-be-2" class="font-bold text-axonBlue">0 reqs (0%)</span>
+                    </div>
+                    <div class="w-full bg-axonPanel rounded-full h-3 border border-axonBorder overflow-hidden">
+                      <div id="bar-be-2" class="bg-axonBlue h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="font-mono text-slate-300">be-3 (Weight: 2)</span>
+                      <span id="val-be-3" class="font-bold text-purple-400">0 reqs (0%)</span>
+                    </div>
+                    <div class="w-full bg-axonPanel rounded-full h-3 border border-axonBorder overflow-hidden">
+                      <div id="bar-be-3" class="bg-purple-400 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="text-[11px] text-slate-500 border-t border-axonBorder pt-2 mt-4">
+                Note: In Consistent Hashing, requests with identical <code class="text-axonBlue">X-Routing-Key</code> will route 100% to the exact same backend on the ring.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 5: LOGS & EVENTS -->
+      <div id="tab-events" class="flex-1 hidden p-6 overflow-y-auto custom-scrollbar flex flex-col space-y-4">
+        <div class="flex justify-between items-center">
+          <div>
+            <h3 class="font-semibold text-sm text-slate-200">Cluster Audit & Protocol Event Log</h3>
+            <p class="text-xs text-slate-400">Real-time trace of SWIM failure detector, gossip dissemination, and proxy events</p>
+          </div>
+          <button onclick="clearEventLogs()" class="px-3 py-1 bg-axonCard border border-axonBorder rounded text-xs hover:border-slate-400">Clear View</button>
+        </div>
+        <div id="eventsLogContainer" class="flex-1 bg-axonPanel border border-axonBorder rounded-lg p-4 font-mono text-xs overflow-y-auto custom-scrollbar space-y-2">
+          <!-- Dynamically populated events -->
+        </div>
+      </div>
+
+      <!-- TAB 6: OPERATIONS & CHAOS -->
+      <div id="tab-chaos" class="flex-1 hidden p-6 overflow-y-auto custom-scrollbar space-y-6">
+        <div class="bg-axonPanel border border-axonBorder rounded-lg p-5 shadow space-y-4">
+          <div>
+            <h3 class="font-semibold text-sm text-slate-200">SWIM Protocol Failure & Recovery Demonstrations</h3>
+            <p class="text-xs text-slate-400">Toggle any node to "Not Working" to observe the full asynchronous SWIM probe failure -> SUSPECT -> DEAD lifecycle</p>
+          </div>
+
+          <div class="grid grid-cols-3 gap-6 pt-2">
+            <!-- Scenario 1 -->
+            <div class="bg-axonCard p-4 rounded-lg border border-axonBorder flex flex-col justify-between space-y-3">
+              <div>
+                <div class="flex items-center space-x-2 text-xs font-semibold text-red-400 mb-1">
+                  <i data-lucide="power-off" class="w-4 h-4"></i>
+                  <span>Cut Network / Stop Node</span>
+                </div>
+                <p class="text-[11px] text-slate-400">Marks Node 2 as NOT WORKING. Watch the protocol fail direct and indirect probes, transition to SUSPECT for 3s, and then declare DEAD.</p>
+              </div>
+              <div class="space-y-2">
+                <button onclick="toggleNodeWorkingState('node-2', false)" class="w-full py-1.5 bg-red-950/70 border border-red-500/40 text-axonRed hover:bg-red-900/80 rounded text-xs font-medium">
+                  Set Node 2 Not Working
+                </button>
+              </div>
+            </div>
+
+            <!-- Scenario 2 -->
+            <div class="bg-axonCard p-4 rounded-lg border border-axonBorder flex flex-col justify-between space-y-3">
+              <div>
+                <div class="flex items-center space-x-2 text-xs font-semibold text-emerald-400 mb-1">
+                  <i data-lucide="power" class="w-4 h-4"></i>
+                  <span>Restore Network / Restart Node</span>
+                </div>
+                <p class="text-[11px] text-slate-400">Brings Node 2 back to WORKING. Node loads SQLite, bumps incarnation (I ← I + 1), and broadcasts an ALIVE refutation.</p>
+              </div>
+              <div class="space-y-2">
+                <button onclick="toggleNodeWorkingState('node-2', true)" class="w-full py-1.5 bg-emerald-950/70 border border-emerald-500/40 text-axonGreen hover:bg-emerald-900/80 rounded text-xs font-medium">
+                  Set Node 2 Working (Refute)
+                </button>
+              </div>
+            </div>
+
+            <!-- Scenario 3 -->
+            <div class="bg-axonCard p-4 rounded-lg border border-axonBorder flex flex-col justify-between space-y-3">
+              <div>
+                <div class="flex items-center space-x-2 text-xs font-semibold text-blue-400 mb-1">
+                  <i data-lucide="plus-circle" class="w-4 h-4"></i>
+                  <span>Add Custom Cluster Node</span>
+                </div>
+                <p class="text-[11px] text-slate-400">Dynamically add a custom node of your choice to the cluster mesh and manage its working status.</p>
+              </div>
+              <div class="space-y-2">
+                <button onclick="openAddNodeModal()" class="w-full py-1.5 bg-blue-950/70 border border-blue-500/40 text-axonBlue hover:bg-blue-900/80 rounded text-xs font-medium">
+                  Add New Node
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- RIGHT SLIDE-OVER DRAWER: NODE INSPECTOR -->
+    <div id="nodeDrawer" class="w-80 border-l border-axonBorder bg-axonPanel transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col z-30 shadow-2xl">
+      <div class="p-4 border-b border-axonBorder flex justify-between items-center">
+        <div class="flex items-center space-x-2">
+          <div id="drawerNodeStatusDot" class="w-3 h-3 rounded-full bg-axonGreen"></div>
+          <h3 id="drawerNodeTitle" class="font-bold text-sm text-slate-200">node-1</h3>
+        </div>
+        <button onclick="closeNodeDrawer()" class="p-1 rounded hover:bg-axonCard text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="flex-1 p-4 overflow-y-auto custom-scrollbar space-y-5 text-xs">
+        
+        <!-- Cluster Placement & Role -->
+        <div>
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">Cluster Placement & Role</div>
+          <div class="bg-axonCard p-3 rounded border border-axonBorder space-y-2">
+            <div class="flex justify-between items-center">
+              <span class="text-slate-400">Node Role:</span>
+              <span id="drawerNodeTypeBadge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-950 text-axonBlue border border-blue-500/40">SERVER</span>
+            </div>
+            <div class="flex justify-between items-center">
+              <span class="text-slate-400">Data Center:</span>
+              <span id="drawerDatacenterBadge" class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-200 border border-slate-700">Data Center A</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Physical Working Toggle -->
+        <div>
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">Physical Machine State</div>
+          <div class="bg-axonCard p-3 rounded border border-axonBorder space-y-2.5">
+            <div class="flex items-center justify-between">
+              <span class="text-slate-300 font-medium">Node Responding:</span>
+              <span id="drawerWorkingBadge" class="font-bold text-axonGreen">YES (Working)</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 pt-1">
+              <button id="btnDrawerSetWorking" class="py-1.5 bg-emerald-950/70 border border-emerald-500/40 text-axonGreen hover:bg-emerald-900/80 rounded font-medium text-[11px]">
+                Set Working
+              </button>
+              <button id="btnDrawerSetNotWorking" class="py-1.5 bg-red-950/70 border border-red-500/40 text-axonRed hover:bg-red-900/80 rounded font-medium text-[11px]">
+                Set Not Working
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Protocol State & Countdown -->
+        <div>
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">SWIM Protocol State</div>
+          <div class="bg-axonCard p-3 rounded border border-axonBorder space-y-2">
+            <div class="flex justify-between">
+              <span class="text-slate-400">Protocol Status:</span>
+              <span id="drawerStatusBadge" class="font-bold text-axonGreen">ALIVE</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Incarnation:</span>
+              <span id="drawerIncarnation" class="font-mono text-purple-400 font-bold">1</span>
+            </div>
+            <div id="drawerSuspicionRow" class="hidden">
+              <div class="flex justify-between text-amber-400">
+                <span>Suspicion Timer:</span>
+                <span id="drawerSuspicionCountdown" class="font-mono font-bold">3.0s</span>
+              </div>
+              <div class="w-full bg-axonPanel rounded-full h-1.5 border border-amber-500/30 overflow-hidden mt-1">
+                <div id="drawerSuspicionBar" class="bg-amber-400 h-full rounded-full transition-all duration-200" style="width: 100%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">Network Ports</div>
+          <div class="bg-axonCard p-3 rounded border border-axonBorder space-y-2">
+            <div class="flex justify-between">
+              <span class="text-slate-400">IP Address:</span>
+              <span id="drawerAddress" class="font-mono text-slate-200">127.0.0.1</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Gossip (UDP):</span>
+              <span id="drawerGossipPort" class="font-mono text-slate-200">9000</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Sync (TCP):</span>
+              <span id="drawerSyncPort" class="font-mono text-slate-200">9001</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Mgmt REST:</span>
+              <span id="drawerMgmtPort" class="font-mono text-slate-200">9002</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">Hosted Microservices</div>
+          <div id="drawerServicesList" class="space-y-1.5">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+
+        <div>
+          <button id="btnDrawerDeleteNode" class="w-full py-1.5 bg-axonCard hover:bg-red-950 text-slate-400 hover:text-axonRed border border-axonBorder rounded text-[11px] transition-colors flex items-center justify-center space-x-1">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+            <span>Remove Node from Cluster</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- MODAL: ADD NODE OF YOUR CHOICE -->
+  <div id="addNodeModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50">
+    <div class="bg-axonPanel border border-axonBorder rounded-xl w-96 p-5 shadow-2xl space-y-4">
+      <div class="flex justify-between items-center border-b border-axonBorder pb-3">
+        <h3 class="font-semibold text-sm text-slate-200 flex items-center space-x-1.5">
+          <i data-lucide="server" class="w-4 h-4 text-axonBlue"></i>
+          <span>Add Node to Cluster</span>
+        </h3>
+        <button onclick="closeAddNodeModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="text-slate-400 block mb-1">Node Identifier:</label>
+          <input type="text" id="addNodeId" placeholder="e.g. node-7 or edge-gateway-2" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-slate-400 block mb-1">Node Role / Type:</label>
+            <select id="addNodeType" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+              <option value="worker" selected>Worker (Compute Node)</option>
+              <option value="server">Server (Control Plane / Seed)</option>
+              <option value="gateway">Gateway (Edge Ingress / Proxy)</option>
+              <option value="database">Database (Storage Replica)</option>
+              <option value="cache">Cache (In-Memory Cache)</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-slate-400 block mb-1">Data Center / Region:</label>
+            <select id="addNodeDatacenter" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+              <option value="Data Center A" selected>Data Center A</option>
+              <option value="Data Center B">Data Center B</option>
+              <option value="Data Center C">Data Center C</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Hosted Service (Optional):</label>
+          <input type="text" id="addNodeService" placeholder="e.g. auth-service or order-service" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Advertised IP Address:</label>
+          <input type="text" id="addNodeAddress" value="127.0.0.1" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-slate-400 block mb-1">Gossip (UDP):</label>
+            <input type="number" id="addNodeGossipPort" value="9600" class="w-full bg-axonCard border border-axonBorder rounded px-2 py-1.5 text-slate-200">
+          </div>
+          <div>
+            <label class="text-slate-400 block mb-1">Sync (TCP):</label>
+            <input type="number" id="addNodeSyncPort" value="9601" class="w-full bg-axonCard border border-axonBorder rounded px-2 py-1.5 text-slate-200">
+          </div>
+          <div>
+            <label class="text-slate-400 block mb-1">REST API:</label>
+            <input type="number" id="addNodeMgmtPort" value="9602" class="w-full bg-axonCard border border-axonBorder rounded px-2 py-1.5 text-slate-200">
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-2 pt-2 border-t border-axonBorder">
+        <button onclick="closeAddNodeModal()" class="px-3 py-1.5 bg-axonCard hover:bg-axonBorder rounded text-xs">Cancel</button>
+        <button onclick="submitAddNode()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold">Join Node to Mesh</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: REGISTER SERVICE -->
+  <div id="registerModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50">
+    <div class="bg-axonPanel border border-axonBorder rounded-xl w-96 p-5 shadow-2xl space-y-4">
+      <div class="flex justify-between items-center border-b border-axonBorder pb-3">
+        <h3 class="font-semibold text-sm text-slate-200">Register Microservice</h3>
+        <button onclick="closeRegisterModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="text-slate-400 block mb-1">Service Name:</label>
+          <input type="text" id="regServiceName" placeholder="e.g. auth-service" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Instance ID:</label>
+          <input type="text" id="regInstanceId" placeholder="e.g. auth-inst-1" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-slate-400 block mb-1">Host IP:</label>
+            <input type="text" id="regAddress" value="127.0.0.1" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+          </div>
+          <div>
+            <label class="text-slate-400 block mb-1">Port:</label>
+            <input type="number" id="regPort" value="8085" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+          </div>
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Traffic Weight (1-10):</label>
+          <input type="number" id="regWeight" value="3" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Health Probe Path:</label>
+          <input type="text" id="regHealthPath" value="http://127.0.0.1:8085/health" class="w-full bg-axonCard border border-axonBorder rounded px-2.5 py-1.5 text-slate-200">
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-2 pt-2 border-t border-axonBorder">
+        <button onclick="closeRegisterModal()" class="px-3 py-1.5 bg-axonCard hover:bg-axonBorder rounded text-xs">Cancel</button>
+        <button onclick="submitRegisterService()" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold">Register Service</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT APPLICATION LOGIC -->
+  <script>
+    // State
+    let clusterData = { nodes: [], links: [] };
+    let currentTab = 'cluster';
+    let currentClusterView = 'graph';
+    let selectedNode = null;
+    let trafficChart = null;
+    let gossipChart = null;
+    let simulation = null;
+    let svgG = null;
+    let zoomHandler = null;
+
+    // Initialize Lucide Icons
+    lucide.createIcons();
+
+    // DOM Ready
+    window.addEventListener('DOMContentLoaded', () => {
+      initD3Topology();
+      initTelemetryCharts();
+      fetchClusterData();
+      setInterval(fetchClusterData, 1000);
+    });
+
+    // Navigation Switcher
+    function switchTab(tabId) {
+      currentTab = tabId;
+      const tabs = ['cluster', 'telemetry', 'services', 'lb', 'events', 'chaos'];
+      tabs.forEach(t => {
+        const el = document.getElementById(`tab-${t}`);
+        const nav = document.getElementById(`nav-${t}`);
+        if (el) el.classList.add('hidden');
+        if (nav) {
+          nav.className = "w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-axonCard transition-colors";
+        }
+      });
+
+      const activeEl = document.getElementById(`tab-${tabId}`);
+      const activeNav = document.getElementById(`nav-${tabId}`);
+      if (activeEl) activeEl.classList.remove('hidden');
+      if (activeNav) {
+        activeNav.className = "w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-md text-xs font-medium text-axonBlue bg-blue-950/40 border border-blue-500/20";
+      }
+
+      const clusterSubnav = document.getElementById('clusterSubnav');
+      if (clusterSubnav) {
+        if (tabId === 'cluster') clusterSubnav.classList.remove('hidden');
+        else clusterSubnav.classList.add('hidden');
+      }
+
+      if (tabId === 'telemetry') {
+        setTimeout(() => {
+          if (trafficChart) trafficChart.update();
+          if (gossipChart) gossipChart.update();
+        }, 100);
+      }
+    }
+
+    // Cluster View Mode (Graph vs List)
+    function setClusterViewMode(mode) {
+      currentClusterView = mode;
+      const btnG = document.getElementById('btnGraphView');
+      const btnL = document.getElementById('btnListView');
+      const viewG = document.getElementById('view-graph');
+      const viewL = document.getElementById('view-list');
+
+      if (mode === 'graph') {
+        btnG.className = "h-full flex items-center space-x-1.5 tab-active transition-colors";
+        btnL.className = "h-full flex items-center space-x-1.5 text-slate-400 hover:text-slate-200 transition-colors";
+        viewG.classList.remove('hidden');
+        viewL.classList.add('hidden');
+        recenterPhysics();
+      } else {
+        btnL.className = "h-full flex items-center space-x-1.5 tab-active transition-colors";
+        btnG.className = "h-full flex items-center space-x-1.5 text-slate-400 hover:text-slate-200 transition-colors";
+        viewL.classList.remove('hidden');
+        viewG.classList.add('hidden');
+      }
+    }
+
+    // Dynamic Context & Datacenter Filter
+    function filterTopologyContext() {
+      const filter = document.getElementById('contextFilter').value;
+      if (!svgG) return;
+      svgG.selectAll(".topology-node").each(function(d) {
+        let match = true;
+        if (filter === 'dc_a' && d.type === 'node') {
+          match = (d.datacenter === 'Data Center A');
+        } else if (filter === 'dc_b' && d.type === 'node') {
+          match = (d.datacenter === 'Data Center B');
+        } else if (filter === 'server' && d.type === 'node') {
+          match = (d.node_type === 'server');
+        } else if (filter === 'worker' && d.type === 'node') {
+          match = (d.node_type === 'worker');
+        } else if (filter === 'gateway' && d.type === 'node') {
+          match = (d.node_type === 'gateway');
+        } else if (filter === 'database' && d.type === 'node') {
+          match = (d.node_type === 'database');
+        } else if (filter === 'swim' && d.type === 'node') {
+          match = (d.status === 'suspect' || d.status === 'dead');
+        }
+        d3.select(this).transition().duration(300).style("opacity", match ? 1.0 : 0.2);
+      });
+    }
+
+    // D3 Topology Graph
+    function initD3Topology() {
+      const svg = d3.select("#topologySvg");
+      const width = document.getElementById('view-graph').clientWidth || 800;
+      const height = document.getElementById('view-graph').clientHeight || 600;
+
+      svg.selectAll("*").remove();
+
+      zoomHandler = d3.zoom()
+        .scaleExtent([0.3, 3])
+        .on("zoom", (event) => {
+          if (svgG) svgG.attr("transform", event.transform);
+        });
+
+      svg.call(zoomHandler);
+      svgG = svg.append("g");
+
+      simulation = d3.forceSimulation()
+        .force("link", d3.forceLink().id(d => d.id).distance(d => d.type === "backbone" ? 140 : 110))
+        .force("charge", d3.forceManyBody().strength(-400))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collision", d3.forceCollide().radius(d => (d.size || 20) + 25));
+    }
+
+    function renderTopology(data) {
+      if (!svgG || !data || !data.nodes) return;
+
+      const nodes = data.nodes;
+      const links = data.links;
+
+      // Update Links
+      let link = svgG.selectAll(".topology-link")
+        .data(links, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
+
+      link.exit().remove();
+
+      const linkEnter = link.enter().append("line")
+        .attr("class", "topology-link")
+        .attr("stroke", d => {
+          if (d.type === "wan_pool") return "rgba(168, 85, 247, 0.6)";
+          if (d.type === "backbone") return "rgba(56, 189, 248, 0.4)";
+          if (d.type === "gossip") return "rgba(0, 230, 118, 0.35)";
+          return "rgba(255, 255, 255, 0.15)";
+        })
+        .attr("stroke-width", d => d.type === "backbone" ? 2.5 : (d.type === "wan_pool" ? 2.0 : 1.5))
+        .attr("stroke-dasharray", d => (d.type === "gossip" || d.type === "wan_pool") ? "3,3" : "none");
+
+      link = linkEnter.merge(link);
+
+      // Update Nodes
+      let node = svgG.selectAll(".topology-node")
+        .data(nodes, d => d.id);
+
+      node.exit().remove();
+
+      const nodeEnter = node.enter().append("g")
+        .attr("class", "topology-node cursor-pointer")
+        .call(d3.drag()
+          .on("start", dragstarted)
+          .on("drag", dragged)
+          .on("end", dragended))
+        .on("click", (event, d) => {
+          openNodeDrawer(d);
+        });
+
+      // Outer glowing ring
+      nodeEnter.append("circle")
+        .attr("class", "node-outer-glow")
+        .attr("r", d => (d.size || 20) + 6)
+        .attr("fill", "transparent")
+        .attr("stroke-width", 2);
+
+      // Core circle
+      nodeEnter.append("circle")
+        .attr("class", "node-core")
+        .attr("r", d => d.size || 20);
+
+      // Inner concentric ring for AxonOps look
+      nodeEnter.append("circle")
+        .attr("class", "node-inner-ring")
+        .attr("r", d => Math.max(4, (d.size || 20) / 2))
+        .attr("fill", "transparent")
+        .attr("stroke-width", 1.5);
+
+      // Label
+      nodeEnter.append("text")
+        .attr("class", "node-label select-none")
+        .attr("dy", d => (d.size || 20) + 16)
+        .attr("text-anchor", "middle")
+        .attr("fill", "#94a3b8")
+        .attr("font-size", "11px")
+        .attr("font-weight", "500");
+
+      node = nodeEnter.merge(node);
+
+      // Styling based on status
+      node.each(function(d) {
+        const g = d3.select(this);
+        let coreColor = "#059669"; // Emerald Worker Green
+        let glowStroke = "rgba(16, 185, 129, 0.5)";
+        let glowWidth = 2;
+        let innerStroke = "#ffffff";
+        let labelText = d.label || d.id;
+        let labelColor = "#94a3b8";
+
+        if (d.type === "cluster") {
+          // Central Root WAN Hub: Deep Navy with Electric Cyan border
+          coreColor = "#0f172a";
+          glowStroke = "#00f0ff";
+          glowWidth = 3;
+          innerStroke = "#00f0ff";
+          labelText = "DICP WAN FEDERATION";
+          labelColor = "#38bdf8";
+        } else if (d.type === "datacenter") {
+          // Datacenter Hubs: Deep Midnight Indigo with Violet border
+          coreColor = "#312e81";
+          glowStroke = "#818cf8";
+          glowWidth = 2.5;
+          innerStroke = "#a5b4fc";
+          labelColor = "#c7d2fe";
+        } else {
+          // Machine Nodes: Distinct Role Coloring
+          const nType = (d.node_type || "worker").toLowerCase();
+          if (nType === "server") {
+            coreColor = "#2563eb"; // Royal Sapphire Blue
+            glowStroke = "rgba(37, 99, 235, 0.6)";
+            labelText = `[SRV] ${d.id}`;
+          } else if (nType === "gateway") {
+            coreColor = "#0891b2"; // Crisp Cyan / Teal (Distinct from amber/orange!)
+            glowStroke = "rgba(6, 182, 212, 0.7)";
+            labelText = `[GW] ${d.id}`;
+          } else if (nType === "database") {
+            coreColor = "#9333ea"; // Rich Amethyst Purple
+            glowStroke = "rgba(168, 85, 247, 0.7)";
+            labelText = `[DB] ${d.id}`;
+          } else if (nType === "cache") {
+            coreColor = "#ec4899"; // Vibrant Pink
+            glowStroke = "rgba(236, 72, 153, 0.7)";
+            labelText = `[CACHE] ${d.id}`;
+          } else {
+            coreColor = "#059669"; // Emerald Worker Green
+            glowStroke = "rgba(16, 185, 129, 0.5)";
+            labelText = `[WRK] ${d.id}`;
+          }
+
+          // Health Status Overrides on Outer Glow Ring & Label
+          if (d.status === "suspect") {
+            glowStroke = "#ffab00"; // Pulsing Neon Warning Amber
+            glowWidth = 4;
+            innerStroke = "#ffab00";
+            labelText = `${labelText} (SUSPECT ${d.suspicion_time_left || 0}s)`;
+            labelColor = "#fbbf24";
+          } else if (d.status === "dead") {
+            coreColor = "#450a0a";  // Dimmed dark red core
+            glowStroke = "#ff1744"; // Crimson Red outer ring
+            glowWidth = 3.5;
+            innerStroke = "#ff1744";
+            labelText = `${labelText} (DEAD)`;
+            labelColor = "#f87171";
+          } else if (d.status === "left") {
+            coreColor = "#334155";
+            glowStroke = "#64748b";
+            innerStroke = "#94a3b8";
+            labelText = `${labelText} (LEFT)`;
+            labelColor = "#64748b";
+          }
+        }
+
+        g.select(".node-core").attr("fill", coreColor);
+        g.select(".node-outer-glow")
+          .attr("stroke", glowStroke)
+          .attr("stroke-width", glowWidth);
+        g.select(".node-inner-ring").attr("stroke", innerStroke);
+        g.select(".node-label")
+          .text(labelText)
+          .attr("fill", labelColor);
+      });
+
+      simulation.nodes(nodes).on("tick", () => {
+        link
+          .attr("x1", d => d.source.x)
+          .attr("y1", d => d.source.y)
+          .attr("x2", d => d.target.x)
+          .attr("y2", d => d.target.y);
+
+        node
+          .attr("transform", d => `translate(${d.x},${d.y})`);
+      });
+
+      simulation.force("link").links(links);
+      simulation.alpha(0.1).restart();
+      filterTopologyContext();
+    }
+
+    function dragstarted(event, d) {
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x;
+      d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+      d.fx = event.x;
+      d.fy = event.y;
+    }
+
+    function dragended(event, d) {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null;
+      d.fy = null;
+    }
+
+    function resetZoom() {
+      const svg = d3.select("#topologySvg");
+      svg.transition().duration(500).call(zoomHandler.transform, d3.zoomIdentity);
+    }
+
+    function recenterPhysics() {
+      if (simulation) simulation.alpha(0.6).restart();
+    }
+
+    // Node Inspector Drawer
+    function openNodeDrawer(d) {
+      selectedNode = d;
+      const drawer = document.getElementById('nodeDrawer');
+      drawer.classList.remove('translate-x-full');
+
+      document.getElementById('drawerNodeTitle').innerText = d.label || d.id;
+      const dot = document.getElementById('drawerNodeStatusDot');
+      const badge = document.getElementById('drawerStatusBadge');
+      const workingBadge = document.getElementById('drawerWorkingBadge');
+
+      const isWorking = d.working !== false;
+      if (isWorking) {
+        workingBadge.innerText = "YES (Working / Online)";
+        workingBadge.className = "font-bold text-axonGreen";
+      } else {
+        workingBadge.innerText = "NO (Unresponsive / Down)";
+        workingBadge.className = "font-bold text-axonRed";
+      }
+
+      let statusText = (d.status || 'alive').toUpperCase();
+      badge.innerText = statusText;
+
+      const suspRow = document.getElementById('drawerSuspicionRow');
+      if (d.status === 'alive') {
+        dot.className = "w-3 h-3 rounded-full bg-axonGreen";
+        badge.className = "font-bold text-axonGreen";
+        suspRow.classList.add('hidden');
+      } else if (d.status === 'suspect') {
+        dot.className = "w-3 h-3 rounded-full bg-axonAmber animate-pulse";
+        badge.className = "font-bold text-axonAmber";
+        suspRow.classList.remove('hidden');
+        document.getElementById('drawerSuspicionCountdown').innerText = `${d.suspicion_time_left || 0}s`;
+        const pct = Math.max(0, Math.min(100, ((d.suspicion_time_left || 0) / 3.0) * 100));
+        document.getElementById('drawerSuspicionBar').style.width = `${pct}%`;
+      } else if (d.status === 'dead') {
+        dot.className = "w-3 h-3 rounded-full bg-axonRed";
+        badge.className = "font-bold text-axonRed";
+        suspRow.classList.add('hidden');
+      } else {
+        dot.className = "w-3 h-3 rounded-full bg-slate-500";
+        badge.className = "font-bold text-slate-400";
+        suspRow.classList.add('hidden');
+      }
+
+      document.getElementById('drawerIncarnation').innerText = d.incarnation || 1;
+      document.getElementById('drawerAddress').innerText = d.address || "127.0.0.1";
+      document.getElementById('drawerGossipPort').innerText = d.gossip_port || 9000;
+      document.getElementById('drawerSyncPort').innerText = d.sync_port || 9001;
+      document.getElementById('drawerMgmtPort').innerText = d.management_port || 9002;
+
+      // Placement & Role Badges
+      const typeBadge = document.getElementById('drawerNodeTypeBadge');
+      if (typeBadge) {
+        const nType = (d.node_type || 'worker').toLowerCase();
+        typeBadge.innerText = nType.toUpperCase();
+        if (nType === 'server') typeBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-blue-950 text-blue-400 border border-blue-500/40";
+        else if (nType === 'gateway') typeBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950 text-cyan-400 border border-cyan-500/40";
+        else if (nType === 'database') typeBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-purple-400 border border-purple-500/40";
+        else if (nType === 'cache') typeBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-pink-950 text-pink-400 border border-pink-500/40";
+        else typeBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-500/40";
+      }
+      const dcBadge = document.getElementById('drawerDatacenterBadge');
+      if (dcBadge) {
+        dcBadge.innerText = d.datacenter || 'Data Center A';
+      }
+
+      // Services
+      const sContainer = document.getElementById('drawerServicesList');
+      sContainer.innerHTML = '';
+      const services = d.services || [];
+      if (services.length === 0) {
+        sContainer.innerHTML = '<div class="text-slate-500 italic">No microservices registered</div>';
+      } else {
+        services.forEach(s => {
+          sContainer.innerHTML += `
+            <div class="p-2 bg-axonPanel rounded border border-axonBorder flex justify-between items-center">
+              <div>
+                <div class="font-medium text-slate-200">${s.service_name}</div>
+                <div class="text-[10px] text-slate-500 font-mono">${s.address}:${s.port}</div>
+              </div>
+              <span class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-950 text-axonGreen border border-emerald-500/30">Healthy</span>
+            </div>
+          `;
+        });
+      }
+
+      // Action buttons
+      document.getElementById('btnDrawerSetWorking').onclick = () => toggleNodeWorkingState(d.id, true);
+      document.getElementById('btnDrawerSetNotWorking').onclick = () => toggleNodeWorkingState(d.id, false);
+      document.getElementById('btnDrawerDeleteNode').onclick = () => deleteNode(d.id);
+    }
+
+    function closeNodeDrawer() {
+      document.getElementById('nodeDrawer').classList.add('translate-x-full');
+      selectedNode = null;
+    }
+
+    // Telemetry Charts
+    function initTelemetryCharts() {
+      // Traffic distribution
+      const ctxTraffic = document.getElementById('trafficDistributionChart').getContext('2d');
+      trafficChart = new Chart(ctxTraffic, {
+        type: 'bar',
+        data: {
+          labels: ['be-1 (Weight: 5)', 'be-2 (Weight: 3)', 'be-3 (Weight: 2)'],
+          datasets: [{
+            label: 'Requests Handled',
+            data: [200, 200, 200],
+            backgroundColor: ['#00e676', '#38bdf8', '#c084fc'],
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } }
+          },
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+
+      // Gossip & SWIM Probes
+      const ctxGossip = document.getElementById('gossipProbesChart').getContext('2d');
+      gossipChart = new Chart(ctxGossip, {
+        type: 'line',
+        data: {
+          labels: ['-10s', '-8s', '-6s', '-4s', '-2s', 'now'],
+          datasets: [
+            {
+              label: 'Gossip Messages',
+              data: [12, 14, 18, 15, 17, 19],
+              borderColor: '#00e676',
+              tension: 0.3,
+              fill: false
+            },
+            {
+              label: 'SWIM Direct Probes',
+              data: [8, 9, 8, 10, 8, 9],
+              borderColor: '#38bdf8',
+              tension: 0.3,
+              fill: false
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } }
+          },
+          plugins: {
+            legend: { labels: { color: '#cbd5e1', font: { size: 10 } } }
+          }
+        }
+      });
+    }
+
+    // Fetch live data from backend API
+    async function fetchClusterData() {
+      try {
+        const [topoRes, overviewRes, lbRes, eventsRes] = await Promise.all([
+          fetch('/api/v1/topology').then(r => r.json()),
+          fetch('/api/v1/cluster').then(r => r.json()),
+          fetch('/api/v1/loadbalancer').then(r => r.json()),
+          fetch('/api/v1/events').then(r => r.json())
+        ]);
+
+        clusterData = topoRes;
+        renderTopology(clusterData);
+        updateTablesAndCards(overviewRes, lbRes);
+        renderEvents(eventsRes);
+
+        // Keep drawer updated if open
+        if (selectedNode) {
+          const updated = (clusterData.nodes || []).find(n => n.id === selectedNode.id);
+          if (updated) openNodeDrawer(updated);
+        }
+      } catch (err) {
+        console.warn("API Poll note:", err.message);
+      }
+    }
+
+    function updateTablesAndCards(overview, lb) {
+      if (overview) {
+        document.getElementById('cardAliveNodes').innerText = overview.alive_nodes || 0;
+        document.getElementById('cardHealthyServices').innerText = overview.total_services || 0;
+        document.getElementById('quickNodesCount').innerText = overview.total_nodes || 0;
+        document.getElementById('quickServicesCount').innerText = overview.total_services || 0;
+      }
+
+      if (lb) {
+        document.getElementById('currentStrategyBadge').innerText = lb.strategy || 'round_robin';
+        document.getElementById('quickSnapshotVersion').innerText = `v${lb.version || 1}`;
+        document.getElementById('lbStrategySelect').value = lb.strategy || 'round_robin';
+      }
+
+      // Update Nodes Table
+      const tbody = document.getElementById('nodesTableBody');
+      tbody.innerHTML = '';
+      (clusterData.nodes || []).filter(n => n.type === 'node').forEach(n => {
+        let statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-950 text-axonGreen border border-emerald-500/30">ALIVE</span>`;
+        if (n.status === 'suspect') {
+          statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-950 text-axonAmber border border-amber-500/30 animate-pulse">SUSPECT (${n.suspicion_time_left || 0}s)</span>`;
+        } else if (n.status === 'dead') {
+          statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-950 text-axonRed border border-red-500/30">DEAD</span>`;
+        } else if (n.status === 'left') {
+          statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-400">LEFT</span>`;
+        }
+
+        const isWorking = n.working !== false;
+        const workingButton = isWorking 
+          ? `<button onclick="toggleNodeWorkingState('${n.id}', false)" class="px-2 py-1 rounded bg-emerald-950 text-axonGreen border border-emerald-500/40 hover:bg-red-950 hover:text-axonRed text-[10px] font-bold">🟢 Working</button>`
+          : `<button onclick="toggleNodeWorkingState('${n.id}', true)" class="px-2 py-1 rounded bg-red-950 text-axonRed border border-red-500/40 hover:bg-emerald-950 hover:text-axonGreen text-[10px] font-bold">🔴 Down (Offline)</button>`;
+
+        let roleBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-500/40">WORKER</span>`;
+        const nType = (n.node_type || 'worker').toLowerCase();
+        if (nType === 'server') roleBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-950 text-blue-400 border border-blue-500/40">SERVER</span>`;
+        else if (nType === 'gateway') roleBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950 text-cyan-400 border border-cyan-500/40">GATEWAY</span>`;
+        else if (nType === 'database') roleBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-purple-400 border border-purple-500/40">DATABASE</span>`;
+        else if (nType === 'cache') roleBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-pink-950 text-pink-400 border border-pink-500/40">CACHE</span>`;
+
+        const dcBadge = `<span class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700">${n.datacenter || 'Data Center A'}</span>`;
+        
+        let servicesList = '<span class="text-slate-500 italic text-[10px]">None</span>';
+        if (n.services && n.services.length > 0) {
+          servicesList = n.services.map(s => `<span class="px-1.5 py-0.5 rounded text-[10px] bg-axonPanel text-slate-200 border border-axonBorder mr-1 inline-block">${s.service_name}</span>`).join('');
+        }
+
+        tbody.innerHTML += `
+          <tr class="hover:bg-axonCard/60 cursor-pointer" onclick='openNodeDrawer(${JSON.stringify(n)})'>
+            <td class="px-3 py-3 font-medium text-slate-200">${n.id}</td>
+            <td class="px-3 py-3">${roleBadge}</td>
+            <td class="px-3 py-3">${dcBadge}</td>
+            <td class="px-3 py-3">${servicesList}</td>
+            <td class="px-3 py-3" onclick="event.stopPropagation()">${workingButton}</td>
+            <td class="px-3 py-3">${statusBadge}</td>
+            <td class="px-3 py-3 font-mono font-bold text-purple-400">${n.incarnation || 1}</td>
+            <td class="px-3 py-3 font-mono text-[10px] text-slate-400">${n.gossip_port}/${n.sync_port}/${n.management_port}</td>
+            <td class="px-3 py-3 text-right space-x-1" onclick="event.stopPropagation()">
+              <button onclick="deleteNode('${n.id}')" class="px-2 py-1 bg-axonCard text-slate-400 hover:text-axonRed border border-axonBorder rounded text-[10px]">Remove</button>
+            </td>
+          </tr>
+        `;
+      });
+
+      // Update Services Table
+      const sBody = document.getElementById('servicesTableBody');
+      sBody.innerHTML = '';
+      let allServices = [];
+      (clusterData.nodes || []).forEach(n => {
+        if (n.services) allServices.push(...n.services);
+      });
+
+      allServices.forEach(s => {
+        sBody.innerHTML += `
+          <tr class="hover:bg-axonCard/60">
+            <td class="px-4 py-3 font-bold text-slate-200">${s.service_name}</td>
+            <td class="px-4 py-3 font-mono text-slate-400">${s.instance_id}</td>
+            <td class="px-4 py-3 text-axonBlue">${s.owner_node_id || 'node-1'}</td>
+            <td class="px-4 py-3 font-mono text-slate-300">${s.address}:${s.port}</td>
+            <td class="px-4 py-3 font-mono font-bold text-amber-400">${s.weight || 1}</td>
+            <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-950 text-axonGreen border border-emerald-500/30">PASSING</span></td>
+            <td class="px-4 py-3 font-mono text-slate-400">25s (Auto-renew)</td>
+            <td class="px-4 py-3 text-right">
+              <button onclick="deleteService('${s.service_name}', '${s.instance_id}')" class="text-slate-400 hover:text-axonRed">
+                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+              </button>
+            </td>
+          </tr>
+        `;
+      });
+      lucide.createIcons();
+    }
+
+    function renderEvents(events) {
+      const container = document.getElementById('eventsLogContainer');
+      if (!container || !events) return;
+      container.innerHTML = '';
+      events.forEach(ev => {
+        let tagColor = 'text-axonBlue';
+        if (ev.type === 'SWIM_FAILURE') tagColor = 'text-axonRed';
+        if (ev.type === 'SWIM_SUSPECT') tagColor = 'text-axonAmber';
+        if (ev.type === 'SWIM_REFUTE') tagColor = 'text-axonGreen';
+
+        container.innerHTML += `
+          <div class="flex items-start space-x-2 border-b border-axonBorder/30 pb-1.5">
+            <span class="text-slate-500">${ev.timestamp}</span>
+            <span class="font-bold ${tagColor}">[${ev.type}]</span>
+            <span class="text-slate-300">${ev.message}</span>
+          </div>
+        `;
+      });
+    }
+
+    // Toggle Node Working / Not Working
+    async function toggleNodeWorkingState(nodeId, working) {
+      try {
+        await fetch(`/api/v1/nodes/${nodeId}/toggle_working`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ working: working })
+        });
+        fetchClusterData();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    // Add Node Modal
+    function openAddNodeModal() {
+      const count = (clusterData.nodes || []).filter(n => n.type === 'node').length + 1;
+      document.getElementById('addNodeId').value = `node-${count}`;
+      document.getElementById('addNodeType').value = "worker";
+      document.getElementById('addNodeDatacenter').value = (count % 2 === 0) ? "Data Center B" : "Data Center A";
+      document.getElementById('addNodeService').value = "";
+      document.getElementById('addNodeAddress').value = "127.0.0.1";
+      document.getElementById('addNodeGossipPort').value = 9000 + (count - 1) * 100;
+      document.getElementById('addNodeSyncPort').value = 9001 + (count - 1) * 100;
+      document.getElementById('addNodeMgmtPort').value = 9002 + (count - 1) * 100;
+
+      document.getElementById('addNodeModal').classList.remove('hidden');
+      document.getElementById('addNodeModal').classList.add('flex');
+    }
+
+    function closeAddNodeModal() {
+      document.getElementById('addNodeModal').classList.add('hidden');
+      document.getElementById('addNodeModal').classList.remove('flex');
+    }
+
+    async function submitAddNode() {
+      const payload = {
+        node_id: document.getElementById('addNodeId').value || 'node-new',
+        node_type: document.getElementById('addNodeType').value || 'worker',
+        datacenter: document.getElementById('addNodeDatacenter').value || 'Data Center A',
+        initial_service: document.getElementById('addNodeService').value || '',
+        address: document.getElementById('addNodeAddress').value || '127.0.0.1',
+        gossip_port: parseInt(document.getElementById('addNodeGossipPort').value || 9600),
+        sync_port: parseInt(document.getElementById('addNodeSyncPort').value || 9601),
+        management_port: parseInt(document.getElementById('addNodeMgmtPort').value || 9602)
+      };
+
+      try {
+        await fetch('/api/v1/nodes/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        closeAddNodeModal();
+        fetchClusterData();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function deleteNode(nodeId) {
+      try {
+        await fetch(`/api/v1/nodes/${nodeId}/delete`, {
+          method: 'DELETE'
+        });
+        closeNodeDrawer();
+        fetchClusterData();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    // Load Balancer Strategy Switch
+    async function applyStrategyChange() {
+      const strat = document.getElementById('lbStrategySelect').value;
+      try {
+        await fetch('/api/v1/loadbalancer/strategy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ strategy: strat })
+        });
+        document.getElementById('currentStrategyBadge').innerText = strat;
+        fetchClusterData();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    // Fire Test Traffic
+    async function sendTestTraffic() {
+      const btn = document.getElementById('btnSendTraffic');
+      btn.disabled = true;
+      btn.innerText = "Sending requests...";
+
+      const count = document.getElementById('trafficCountSelect').value;
+      const service = document.getElementById('trafficServiceInput').value;
+      const key = document.getElementById('trafficKeyInput').value;
+
+      try {
+        const res = await fetch('/api/v1/loadbalancer/traffic', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests: count, service: service, routing_key: key })
+        }).then(r => r.json());
+
+        const dist = res.distribution || {};
+        const total = res.success || count;
+
+        const b1 = dist['be-1'] || 0;
+        const b2 = dist['be-2'] || 0;
+        const b3 = dist['be-3'] || 0;
+
+        document.getElementById('val-be-1').innerText = `${b1} reqs (${Math.round((b1/total)*100)}%)`;
+        document.getElementById('bar-be-1').style.width = `${Math.round((b1/total)*100)}%`;
+
+        document.getElementById('val-be-2').innerText = `${b2} reqs (${Math.round((b2/total)*100)}%)`;
+        document.getElementById('bar-be-2').style.width = `${Math.round((b2/total)*100)}%`;
+
+        document.getElementById('val-be-3').innerText = `${b3} reqs (${Math.round((b3/total)*100)}%)`;
+        document.getElementById('bar-be-3').style.width = `${Math.round((b3/total)*100)}%`;
+
+        document.getElementById('trafficBatchSummary').innerText = `Sent ${count} requests (${res.success} succeeded, ${res.failed} errors)`;
+
+        // Update Chart
+        if (trafficChart) {
+          trafficChart.data.datasets[0].data = [b1, b2, b3];
+          trafficChart.update();
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i data-lucide="play" class="w-3.5 h-3.5 mr-1"></i> Send Request Burst`;
+        lucide.createIcons();
+      }
+    }
+
+    // Service Registration Modal
+    function openRegisterModal() {
+      document.getElementById('registerModal').classList.remove('hidden');
+      document.getElementById('registerModal').classList.add('flex');
+    }
+
+    function closeRegisterModal() {
+      document.getElementById('registerModal').classList.add('hidden');
+      document.getElementById('registerModal').classList.remove('flex');
+    }
+
+    async function submitRegisterService() {
+      const payload = {
+        service_name: document.getElementById('regServiceName').value || 'demo-service',
+        instance_id: document.getElementById('regInstanceId').value || 'inst-' + Date.now().toString().slice(-4),
+        address: document.getElementById('regAddress').value || '127.0.0.1',
+        port: parseInt(document.getElementById('regPort').value || 8085),
+        weight: parseInt(document.getElementById('regWeight').value || 1),
+        health_check_url: document.getElementById('regHealthPath').value || 'http://127.0.0.1:8085/health'
+      };
+
+      try {
+        await fetch('/api/v1/ui/services/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        closeRegisterModal();
+        fetchClusterData();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function deleteService(name, instanceId) {
+      try {
+        await fetch(`/api/v1/services/${name}/instances/${instanceId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer secret-token-123' }
+        });
+        fetchClusterData();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function clearEventLogs() {
+      document.getElementById('eventsLogContainer').innerHTML = '<div class="text-slate-500 italic">Logs cleared.</div>';
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,94 @@
+{
+  "round_robin": {
+    "total_requests": 600,
+    "successful_requests": 600,
+    "errors": 0,
+    "duration_sec": 18.319,
+    "throughput_rps": 32.8,
+    "latency_ms": {
+      "p50": 328.58,
+      "p90": 1013.18,
+      "p95": 1039.81,
+      "p99": 1087.16,
+      "mean": 485.38
+    },
+    "backend_distribution": {
+      "be-2": 200,
+      "be-3": 200,
+      "be-1": 200
+    }
+  },
+  "weighted_round_robin": {
+    "total_requests": 600,
+    "successful_requests": 600,
+    "errors": 0,
+    "duration_sec": 18.307,
+    "throughput_rps": 32.8,
+    "latency_ms": {
+      "p50": 330.58,
+      "p90": 1025.02,
+      "p95": 1052.67,
+      "p99": 1098.07,
+      "mean": 486.34
+    },
+    "backend_distribution": {
+      "be-1": 300,
+      "be-2": 180,
+      "be-3": 120
+    }
+  },
+  "least_connections": {
+    "total_requests": 600,
+    "successful_requests": 600,
+    "errors": 0,
+    "duration_sec": 17.833,
+    "throughput_rps": 33.6,
+    "latency_ms": {
+      "p50": 323.52,
+      "p90": 999.18,
+      "p95": 1034.81,
+      "p99": 1188.09,
+      "mean": 473.39
+    },
+    "backend_distribution": {
+      "be-1": 571,
+      "be-2": 27,
+      "be-3": 2
+    }
+  },
+  "consistent_hash": {
+    "total_requests": 600,
+    "successful_requests": 600,
+    "errors": 0,
+    "duration_sec": 17.496,
+    "throughput_rps": 34.3,
+    "latency_ms": {
+      "p50": 324.3,
+      "p90": 972.72,
+      "p95": 1014.31,
+      "p99": 1114.09,
+      "mean": 464.24
+    },
+    "backend_distribution": {
+      "be-2": 600
+    }
+  },
+  "failover": {
+    "total_requests": 300,
+    "successful_requests": 300,
+    "errors": 0,
+    "duration_sec": 7.083,
+    "throughput_rps": 42.4,
+    "latency_ms": {
+      "p50": 131.34,
+      "p90": 787.56,
+      "p95": 791.89,
+      "p99": 803.8,
+      "mean": 280.88
+    },
+    "backend_distribution": {
+      "be-1": 150,
+      "be-3": 150
+    }
+  }
+}
